@@ -41,6 +41,16 @@ public abstract class BaseRecordController implements RecordController {
     protected BitrateManager bitrateManager;
     protected volatile long startTs = 0;
     protected RecordTracks tracks = RecordTracks.ALL;
+    protected RequestKeyFrame requestKeyFrame = null;
+
+    public void updateInfo(BaseRecordController recordController) {
+        videoCodec = recordController.videoCodec;
+        audioCodec = recordController.audioCodec;
+    }
+
+    public void setRequestKeyFrame(RequestKeyFrame requestKeyFrame) {
+        this.requestKeyFrame = requestKeyFrame;
+    }
 
     public void setVideoCodec(VideoCodec videoCodec) {
         this.videoCodec = videoCodec;

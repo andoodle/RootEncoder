@@ -72,7 +72,7 @@ fun ByteBuffer.removeInfo(info: MediaFrame.Info): ByteBuffer {
   try {
     position(info.offset)
     limit(info.size)
-  } catch (ignored: Exception) { }
+  } catch (_: Exception) { }
   return slice()
 }
 
@@ -80,7 +80,7 @@ inline infix fun <reified T: Any> BlockingQueue<T>.trySend(item: T): Boolean {
   return try {
     this.add(item)
     true
-  } catch (e: IllegalStateException) {
+  } catch (_: IllegalStateException) {
     false
   }
 }

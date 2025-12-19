@@ -301,12 +301,9 @@ public abstract class DisplayBase {
       throws IOException {
     RecordController.RecordTracks tracks = audioInitialized ?
             RecordController.RecordTracks.ALL : RecordController.RecordTracks.VIDEO;
+    recordController.setRequestKeyFrame(this::requestKeyFrame);
     recordController.startRecord(path, listener, tracks);
-    if (!streaming) {
-      startEncoders(resultCode, data, mediaProjectionCallback);
-    } else if (videoEncoder.isRunning()) {
-      requestKeyFrame();
-    }
+    if (!streaming) startEncoders(resultCode, data, mediaProjectionCallback);
   }
 
   public void startRecord(@NonNull final String path) throws IOException {
@@ -324,12 +321,9 @@ public abstract class DisplayBase {
       @Nullable RecordController.Listener listener) throws IOException {
     RecordController.RecordTracks tracks = audioInitialized ?
             RecordController.RecordTracks.ALL : RecordController.RecordTracks.VIDEO;
+    recordController.setRequestKeyFrame(this::requestKeyFrame);
     recordController.startRecord(fd, listener, tracks);
-    if (!streaming) {
-      startEncoders(resultCode, data, mediaProjectionCallback);
-    } else if (videoEncoder.isRunning()) {
-      requestKeyFrame();
-    }
+    if (!streaming) startEncoders(resultCode, data, mediaProjectionCallback);
   }
 
   @RequiresApi(api = Build.VERSION_CODES.O)
@@ -579,7 +573,10 @@ public abstract class DisplayBase {
   protected abstract void getVideoDataImp(ByteBuffer videoBuffer, MediaCodec.BufferInfo info);
 
   public void setRecordController(BaseRecordController recordController) {
-    if (!isRecording()) this.recordController = recordController;
+    if (!isRecording()) {
+      recordController.updateInfo(this.recordController);
+      this.recordController = recordController;
+    }
   }
 
   private final GetMicrophoneData getMicrophoneData = frame -> {

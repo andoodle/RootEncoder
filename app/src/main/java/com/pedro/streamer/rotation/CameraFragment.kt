@@ -78,7 +78,6 @@ class CameraFragment: Fragment(), ConnectChecker {
   val genericStream: GenericStream by lazy {
     GenericStream(requireContext(), this).apply {
       getGlInterface().autoHandleOrientation = true
-      getStreamClient().setBitrateExponentialFactor(0.5f)
     }
   }
   private lateinit var surfaceView: SurfaceView
@@ -144,12 +143,12 @@ class CameraFragment: Fragment(), ConnectChecker {
         if (!folder.exists()) folder.mkdir()
         val sdf = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault())
         recordPath = "${folder.absolutePath}/${sdf.format(Date())}.mp4"
+        bRecord.setImageResource(R.drawable.pause_icon)
         genericStream.startRecord(recordPath) { status ->
           if (status == RecordController.Status.RECORDING) {
             bRecord.setImageResource(R.drawable.stop_icon)
           }
         }
-        bRecord.setImageResource(R.drawable.pause_icon)
       } else {
         genericStream.stopRecord()
         bRecord.setImageResource(R.drawable.record_icon)
