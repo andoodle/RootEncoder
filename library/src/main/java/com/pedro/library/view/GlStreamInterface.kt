@@ -21,6 +21,7 @@ import android.graphics.Point
 import android.graphics.SurfaceTexture
 import android.graphics.SurfaceTexture.OnFrameAvailableListener
 import android.os.Build
+import android.util.Log
 import android.view.Surface
 import androidx.annotation.RequiresApi
 import com.pedro.common.newSingleThreadExecutor
@@ -315,9 +316,13 @@ class GlStreamInterface(private val context: Context) : OnFrameAvailableListener
         if (takePhotoCallback != null && surfaceManagerPhoto.isReady && mainRender.isReady()) {
             if (surfaceManagerPhoto.makeCurrent()) {
                 mainRender.drawScreen(
-                    encoderWidth, encoderHeight, AspectRatioMode.NONE,
+                    photoWidth, photoHeight, AspectRatioMode.NONE,
                     streamOrientation, isStreamVerticalFlip, isStreamHorizontalFlip, streamViewPort
                 )
+                Log.d("GlStreamInterface", "takePhoto photoWidthxphotoHeight:  ${photoWidth}x${photoHeight}; " +
+                        "recordWidth: $encoderRecordWidth; encoderHeight: $encoderRecordHeight" +
+                        "; streamWidth: $encoderWidth; streamHeight: $encoderHeight;" +
+                        "")
                 takePhotoCallback?.onTakePhoto(GlUtil.getBitmap(photoWidth, photoHeight))
                 takePhotoCallback = null
                 surfaceManagerPhoto.swapBuffer()
