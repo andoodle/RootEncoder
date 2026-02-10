@@ -157,6 +157,49 @@ abstract class StreamBase(
     return false
   }
 
+    fun prepareVideo(
+        width: Int, height: Int, bitrate: Int, fps: Int = 30, iFrameInterval: Int = 2,
+        rotation: Int = 0, profile: Int = -1, level: Int = -1,
+        recordWidth: Int = 0, recordHeight: Int = 0, recordBitrate: Int = bitrate,
+        recordCodec: VideoCodec = VideoCodec.H264
+    ): Boolean {
+        if (isStreaming || isRecording || isOnPreview) {
+            throw IllegalStateException("Stream, record and preview must be stopped before prepareVideo")
+        }
+        differentRecordResolution = false
+        if (recordWidth > 0 && recordHeight > 0) {
+            if (recordWidth.toDouble() / recordHeight.toDouble() != width.toDouble() / height.toDouble()) {
+                throw IllegalArgumentException("The aspect ratio of record and stream resolution must be the same")
+            }
+            differentRecordResolution = true
+        }
+        val videoResult = videoSource.init(max(width, recordWidth), max(height, recordHeight), fps, rotation)
+        if (videoResult) {
+            if (differentRecordResolution) {
+                //using different record resolution
+                if (rotation == 90 || rotation == 270) glInterface.setEncoderRecordSize(recordHeight, recordWidth)
+                else glInterface.setEncoderRecordSize(recordWidth, recordHeight)
+            }
+            if (rotation == 90 || rotation == 270) glInterface.setEncoderSize(height, width)
+            else glInterface.setEncoderSize(width, height)
+            val isPortrait = rotation == 90 || rotation == 270
+            glInterface.setIsPortrait(isPortrait)
+            glInterface.setCameraOrientation(if (rotation == 0) 270 else rotation - 90)
+            glInterface.setOrientationConfig(videoSource.getOrientationConfig())
+            if (differentRecordResolution) {
+//                videoEncoderRecord.setTryForceVBRBitrateMode(true)
+                val result = videoEncoderRecord.prepareVideoEncoder(recordWidth, recordHeight, fps, recordBitrate, rotation,
+                    iFrameInterval, FormatVideoEncoder.SURFACE, profile, level)
+                if (!result) return false
+            }
+            val result = videoEncoder.prepareVideoEncoder(width, height, fps, bitrate, rotation,
+                iFrameInterval, FormatVideoEncoder.SURFACE, profile, level)
+            forceFpsLimit(true)
+            return result
+        }
+        return false
+    }
+
   /**
    * Necessary only one time before start stream or record.
    * If you want change values stop stream and record is necessary.
@@ -233,7 +276,7 @@ abstract class StreamBase(
    */
   fun forceCodecType(codecTypeVideo: CodecUtil.CodecType, codecTypeAudio: CodecUtil.CodecType) {
     videoEncoder.forceCodecType(codecTypeVideo)
-    videoEncoderRecord.forceCodecType(codecTypeVideo)
+//    videoEncoderRecord.forceCodecType(codecTypeVideo)
     audioEncoder.forceCodecType(codecTypeAudio)
   }
 
@@ -266,6 +309,7 @@ abstract class StreamBase(
     val usedTracks = tracks ?: if (videoSource is NoVideoSource) RecordController.RecordTracks.AUDIO
         else if (audioSource is NoAudioSource) RecordController.RecordTracks.VIDEO
         else RecordController.RecordTracks.ALL
+      recordController.setVideoCodec(VideoCodec.H264)
     recordController.setRequestKeyFrame {
       videoEncoder.requestKeyframe()
       videoEncoderRecord.requestKeyframe()
