@@ -1110,7 +1110,7 @@ public abstract class Camera2Base {
 
     public void setVideoCodec(VideoCodec codec) {
         setVideoCodecImp(codec);
-        recordController.setVideoCodec(codec);
+//        recordController.setVideoCodec(codec);
         String type = switch (codec) {
             case H264 -> CodecUtil.H264_MIME;
             case H265 -> CodecUtil.H265_MIME;

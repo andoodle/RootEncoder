@@ -37,6 +37,7 @@ import com.pedro.extrasources.CameraXSource
 import com.pedro.library.base.recording.RecordController
 import com.pedro.library.generic.GenericStream
 import com.pedro.library.util.BitrateAdapter
+import com.pedro.library.util.FlvMuxerRecordController
 import com.pedro.streamer.R
 import com.pedro.streamer.utils.PathUtils
 import com.pedro.streamer.utils.toast
@@ -144,6 +145,8 @@ class CameraFragment: Fragment(), ConnectChecker {
         val sdf = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault())
         recordPath = "${folder.absolutePath}/${sdf.format(Date())}.mp4"
         bRecord.setImageResource(R.drawable.pause_icon)
+          val recordController = FlvMuxerRecordController()
+          genericStream.setRecordController(recordController)
         genericStream.startRecord(recordPath) { status ->
           if (status == RecordController.Status.RECORDING) {
             bRecord.setImageResource(R.drawable.stop_icon)
