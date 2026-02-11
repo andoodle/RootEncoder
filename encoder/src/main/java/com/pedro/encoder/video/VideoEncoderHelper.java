@@ -73,14 +73,23 @@ public class VideoEncoderHelper {
    */
   public static List<ByteBuffer> extractVpsSpsPpsFromH265(ByteBuffer csd0byteBuffer) {
     List<ByteBuffer> byteBufferList = new ArrayList<>();
+    int length = csd0byteBuffer.remaining();
+    if (length <= 0) return byteBufferList;
+    byte[] csdArray = new byte[length];
+    csd0byteBuffer.get(csdArray, 0, length);
+    csd0byteBuffer.rewind();
+    // hvcC (HEVCDecoderConfigurationRecord)
+    if ((csdArray[0] & 0xFF) == 1) {
+      List<ByteBuffer> hvcc = parseHvcc(csdArray);
+      if (hvcc.size() >= 3) return hvcc;
+      return byteBufferList;
+    }
+
+    // Annex-B start codes (0x00000001)
     int vpsPosition = -1;
     int spsPosition = -1;
     int ppsPosition = -1;
     int contBufferInitiation = 0;
-    int length = csd0byteBuffer.remaining();
-    byte[] csdArray = new byte[length];
-    csd0byteBuffer.get(csdArray, 0, length);
-    csd0byteBuffer.rewind();
     for (int i = 0; i < csdArray.length; i++) {
       if (contBufferInitiation == 3 && csdArray[i] == 1) {
         if (vpsPosition == -1) {
@@ -97,7 +106,10 @@ public class VideoEncoderHelper {
         contBufferInitiation = 0;
       }
     }
-    if (vpsPosition == -1 || spsPosition == -1 || ppsPosition == -1) return byteBufferList;
+    if (vpsPosition < 0 || spsPosition < 0 || ppsPosition < 0) return byteBufferList;
+    if (!(vpsPosition < spsPosition && spsPosition < ppsPosition && ppsPosition <= csdArray.length)) {
+      return byteBufferList;
+    }
     byte[] vps = new byte[spsPosition];
     byte[] sps = new byte[ppsPosition - spsPosition];
     byte[] pps = new byte[csdArray.length - ppsPosition];
@@ -114,6 +126,57 @@ public class VideoEncoderHelper {
     byteBufferList.add(ByteBuffer.wrap(sps));
     byteBufferList.add(ByteBuffer.wrap(pps));
     return byteBufferList;
+  }
+
+  private static List<ByteBuffer> parseHvcc(byte[] csdArray) {
+    List<ByteBuffer> out = new ArrayList<>();
+    if (csdArray.length < 23) return out;
+    int index = 22; // points to numOfArrays
+    int numOfArrays = csdArray[index] & 0xFF;
+    index += 1;
+
+    ByteBuffer vps = null;
+    ByteBuffer sps = null;
+    ByteBuffer pps = null;
+    byte[] startCode = new byte[] {0, 0, 0, 1};
+
+    for (int i = 0; i < numOfArrays && index + 3 <= csdArray.length; i++) {
+      int nalUnitType = csdArray[index] & 0x3F;
+      index += 1;
+      int numNalus = ((csdArray[index] & 0xFF) << 8) | (csdArray[index + 1] & 0xFF);
+      index += 2;
+      for (int j = 0; j < numNalus && index + 2 <= csdArray.length; j++) {
+        int nalSize = ((csdArray[index] & 0xFF) << 8) | (csdArray[index + 1] & 0xFF);
+        index += 2;
+        if (nalSize <= 0 || index + nalSize > csdArray.length) {
+          return out;
+        }
+        if (nalUnitType == 32 && vps == null) {
+          byte[] nal = new byte[startCode.length + nalSize];
+          System.arraycopy(startCode, 0, nal, 0, startCode.length);
+          System.arraycopy(csdArray, index, nal, startCode.length, nalSize);
+          vps = ByteBuffer.wrap(nal);
+        } else if (nalUnitType == 33 && sps == null) {
+          byte[] nal = new byte[startCode.length + nalSize];
+          System.arraycopy(startCode, 0, nal, 0, startCode.length);
+          System.arraycopy(csdArray, index, nal, startCode.length, nalSize);
+          sps = ByteBuffer.wrap(nal);
+        } else if (nalUnitType == 34 && pps == null) {
+          byte[] nal = new byte[startCode.length + nalSize];
+          System.arraycopy(startCode, 0, nal, 0, startCode.length);
+          System.arraycopy(csdArray, index, nal, startCode.length, nalSize);
+          pps = ByteBuffer.wrap(nal);
+        }
+        index += nalSize;
+      }
+    }
+
+    if (vps != null && sps != null && pps != null) {
+      out.add(vps);
+      out.add(sps);
+      out.add(pps);
+    }
+    return out;
   }
 
   /**
