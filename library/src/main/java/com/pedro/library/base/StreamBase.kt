@@ -310,7 +310,7 @@ abstract class StreamBase(
     val usedTracks = tracks ?: if (videoSource is NoVideoSource) RecordController.RecordTracks.AUDIO
         else if (audioSource is NoAudioSource) RecordController.RecordTracks.VIDEO
         else RecordController.RecordTracks.ALL
-      recordController.setVideoCodec(VideoCodec.H264)
+//      recordController.setVideoCodec(VideoCodec.H264)
     recordController.setRequestKeyFrame {
       videoEncoder.requestKeyframe()
       videoEncoderRecord.requestKeyframe()
