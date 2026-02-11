@@ -231,8 +231,9 @@ abstract class StreamBase(
     if (isStreaming) throw IllegalStateException("Stream already started, stopStream before startStream again")
     isStreaming = true
     startStreamImp(endPoint)
-    if (!isRecording) startSources()
-    else requestKeyframe()
+      startSources()
+//    if (!isRecording) startSources()
+//    requestKeyframe()
   }
 
   /**
