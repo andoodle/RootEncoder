@@ -516,6 +516,62 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
     return byteBufferList;
   }
 
+  private List<ByteBuffer> extractVpsSpsPpsFromH265Avcc(ByteBuffer buffer, int length) {
+    List<ByteBuffer> out = new ArrayList<>();
+    if (length <= 8) return out;
+    ByteBuffer dup = buffer.duplicate();
+    dup.rewind();
+    int offset = 0;
+    ByteBuffer vps = null;
+    ByteBuffer sps = null;
+    ByteBuffer pps = null;
+    while (offset + 4 <= length) {
+      int nalSize = ((dup.get(offset) & 0xFF) << 24)
+          | ((dup.get(offset + 1) & 0xFF) << 16)
+          | ((dup.get(offset + 2) & 0xFF) << 8)
+          | (dup.get(offset + 3) & 0xFF);
+      offset += 4;
+      if (nalSize <= 0 || offset + nalSize > length) break;
+      int nalType = (dup.get(offset) >> 1) & 0x3F;
+      if (nalType == 32 && vps == null) {
+        byte[] bytes = new byte[nalSize + 4];
+        bytes[0] = 0x00;
+        bytes[1] = 0x00;
+        bytes[2] = 0x00;
+        bytes[3] = 0x01;
+        dup.position(offset);
+        dup.get(bytes, 4, nalSize);
+        vps = ByteBuffer.wrap(bytes);
+      } else if (nalType == 33 && sps == null) {
+        byte[] bytes = new byte[nalSize + 4];
+        bytes[0] = 0x00;
+        bytes[1] = 0x00;
+        bytes[2] = 0x00;
+        bytes[3] = 0x01;
+        dup.position(offset);
+        dup.get(bytes, 4, nalSize);
+        sps = ByteBuffer.wrap(bytes);
+      } else if (nalType == 34 && pps == null) {
+        byte[] bytes = new byte[nalSize + 4];
+        bytes[0] = 0x00;
+        bytes[1] = 0x00;
+        bytes[2] = 0x00;
+        bytes[3] = 0x01;
+        dup.position(offset);
+        dup.get(bytes, 4, nalSize);
+        pps = ByteBuffer.wrap(bytes);
+      }
+      if (vps != null && sps != null && pps != null) break;
+      offset += nalSize;
+    }
+    if (vps != null && sps != null && pps != null) {
+      out.add(vps);
+      out.add(sps);
+      out.add(pps);
+    }
+    return out;
+  }
+
   private List<ByteBuffer> parseHvcc(byte[] csdArray) {
     List<ByteBuffer> out = new ArrayList<>();
     // Parse HEVCDecoderConfigurationRecord (ISO/IEC 14496-15)
@@ -641,6 +697,9 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
     } else if (!spsPpsSetted && type.equals(CodecUtil.H265_MIME)) {
       Log.i(TAG, "formatChanged not called, doing manual vps/sps/pps extraction...");
       List<ByteBuffer> byteBufferList = extractVpsSpsPpsFromH265(byteBuffer.duplicate());
+      if (byteBufferList.size() != 3) {
+        byteBufferList = extractVpsSpsPpsFromH265Avcc(byteBuffer.duplicate(), bufferInfo.size);
+      }
       if (byteBufferList.size() == 3) {
         Log.i(TAG, "manual vps/sps/pps extraction success");
         oldSps = byteBufferList.get(1);

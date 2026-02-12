@@ -21,6 +21,7 @@ import android.graphics.SurfaceTexture
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.os.Build
+import android.util.Log
 import android.util.Size
 import android.view.Surface
 import android.view.SurfaceView
@@ -85,6 +86,8 @@ abstract class StreamBase(
   //video/audio record
   private var recordController: BaseRecordController = AndroidMuxerRecordController()
   private val fpsListener = FpsListener()
+  private var lastVideoFormat: MediaFormat? = null
+  private var lastAudioFormat: MediaFormat? = null
   var isStreaming = false
     private set
   var isOnPreview = false
@@ -532,6 +535,13 @@ abstract class StreamBase(
     if (!isRecording) {
       recordController.updateInfo(this.recordController)
       this.recordController = recordController
+      // If streaming is already running, the new record controller won't receive initial formats.
+      // Replay the latest formats so it can build codec config (SPS/PPS) immediately.
+      lastAudioFormat?.let { this.recordController.setAudioFormat(it) }
+      lastVideoFormat?.let { this.recordController.setVideoFormat(it) }
+      if (isStreaming) {
+        requestKeyframe()
+      }
     }
   }
 
@@ -631,6 +641,7 @@ abstract class StreamBase(
     }
 
     override fun onAudioFormat(mediaFormat: MediaFormat) {
+      lastAudioFormat = mediaFormat
       recordController.setAudioFormat(mediaFormat)
     }
   }
@@ -648,6 +659,7 @@ abstract class StreamBase(
 
     override fun onVideoFormat(mediaFormat: MediaFormat) {
       if (!differentRecordResolution) {
+        lastVideoFormat = mediaFormat
         recordController.setVideoFormat(mediaFormat)
       }
     }
@@ -662,6 +674,7 @@ abstract class StreamBase(
     }
 
     override fun onVideoFormat(mediaFormat: MediaFormat) {
+      lastVideoFormat = mediaFormat
       recordController.setVideoFormat(mediaFormat)
     }
   }
@@ -707,6 +720,15 @@ abstract class StreamBase(
       VideoCodec.AV1 -> CodecUtil.AV1_MIME
     }
     videoEncoder.type = type
+    // Recording codec is controlled separately (e.g., setVideoRecCodec)
+    if (isStreaming) {
+      Log.i("StreamBase", "setVideoCodec: streaming active, resetting video encoder for codec=${codec.name}")
+      val resetOk = resetVideoEncoder()
+      if (!resetOk) {
+        throw IllegalStateException("Failed to reset video encoder after codec change")
+      }
+      requestKeyframe()
+    }
   }
 
   /**
