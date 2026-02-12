@@ -160,8 +160,9 @@ class FlvMuxerRecordController: BaseRecordController() {
             if (!sendInfo) {
                 when (videoPacket) {
                     is H264Packet -> {
-                        val buffers =
+                        val buffers: android.util.Pair<ByteBuffer, ByteBuffer>? =
                             VideoEncoderHelper.decodeSpsPpsFromBuffer(buffer.duplicate(), info.size)
+                                ?: extractSpsPpsFromAvcc(buffer.duplicate(), info.size)
                         if (buffers != null) {
                             Log.i(TAG, "manual sps/pps extraction success")
                             val oldSps = buffers.first
@@ -208,6 +209,47 @@ class FlvMuxerRecordController: BaseRecordController() {
             requestKeyFrame.onRequestKeyFrame()
             requestKeyFrame = null
         }
+    }
+
+    // Handle AVCC (length-prefixed) output: [len][NAL]... where NAL type 7 = SPS, 8 = PPS.
+    private fun extractSpsPpsFromAvcc(buffer: ByteBuffer, length: Int): android.util.Pair<ByteBuffer, ByteBuffer>? {
+        if (length < 8) return null
+        val dup = buffer.duplicate()
+        dup.rewind()
+        var offset = 0
+        var sps: ByteBuffer? = null
+        var pps: ByteBuffer? = null
+        while (offset + 4 <= length) {
+            val nalSize = ((dup.get(offset).toInt() and 0xFF) shl 24) or
+                    ((dup.get(offset + 1).toInt() and 0xFF) shl 16) or
+                    ((dup.get(offset + 2).toInt() and 0xFF) shl 8) or
+                    (dup.get(offset + 3).toInt() and 0xFF)
+            offset += 4
+            if (nalSize <= 0 || offset + nalSize > length) break
+            val nalType = dup.get(offset).toInt() and 0x1F
+            if (nalType == 7 && sps == null) {
+                val spsBytes = ByteArray(nalSize + 4)
+                spsBytes[0] = 0x00
+                spsBytes[1] = 0x00
+                spsBytes[2] = 0x00
+                spsBytes[3] = 0x01
+                dup.position(offset)
+                dup.get(spsBytes, 4, nalSize)
+                sps = ByteBuffer.wrap(spsBytes)
+            } else if (nalType == 8 && pps == null) {
+                val ppsBytes = ByteArray(nalSize + 4)
+                ppsBytes[0] = 0x00
+                ppsBytes[1] = 0x00
+                ppsBytes[2] = 0x00
+                ppsBytes[3] = 0x01
+                dup.position(offset)
+                dup.get(ppsBytes, 4, nalSize)
+                pps = ByteBuffer.wrap(ppsBytes)
+            }
+            if (sps != null && pps != null) return android.util.Pair(sps, pps)
+            offset += nalSize
+        }
+        return null
     }
 
     override fun setVideoFormat(videoFormat: MediaFormat) {
