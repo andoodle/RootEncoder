@@ -180,6 +180,11 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
                 // MediaFormat.KEY_LEVEL, API > 23
                 videoFormat.setInteger("level", this.level);
             }
+            if (type.equals(CodecUtil.H264_MIME) || type.equals(CodecUtil.H265_MIME)) {
+                try {
+                    videoFormat.setInteger("prepend-sps-pps-to-idr-frames", 1);
+                } catch (Exception ignored) { }
+            }
             setCallback();
             codec.configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
             running = false;

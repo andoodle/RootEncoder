@@ -232,8 +232,7 @@ abstract class StreamBase(
     isStreaming = true
     startStreamImp(endPoint)
       startSources()
-//    if (!isRecording) startSources()
-//    requestKeyframe()
+    requestKeyframe()
   }
 
   /**
@@ -317,6 +316,7 @@ abstract class StreamBase(
     }
     recordController.startRecord(path, listener, usedTracks)
     if (!isStreaming) startSources()
+    requestKeyframe()
   }
 
   /**
