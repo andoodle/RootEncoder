@@ -29,6 +29,7 @@ import com.pedro.srt.mpeg2ts.psi.PsiManager
 import com.pedro.srt.srt.packets.data.PacketPosition
 import com.pedro.srt.utils.chunkPackets
 import com.pedro.srt.utils.startWith
+import java.nio.BufferOverflowException
 import java.nio.ByteBuffer
 
 /**
@@ -113,7 +114,8 @@ class H26XPacket(
     var noHeaderBuffer = removeHeader(byteBuffer, isKeyFrame) //remove video info header
     val startCodeSize = getStartCodeSize(noHeaderBuffer)
     if (startCodeSize == 0) { //make sure buffer start with prefix
-      val bufferWithPrefix = ByteBuffer.allocate(noHeaderBuffer.remaining() + 4)
+      val prefixSize = noHeaderBuffer.remaining() + 4
+      val bufferWithPrefix = ByteBuffer.allocate(prefixSize)
       bufferWithPrefix.putInt(0x00000001)
       bufferWithPrefix.put(noHeaderBuffer)
       noHeaderBuffer = bufferWithPrefix
@@ -124,7 +126,8 @@ class H26XPacket(
       val pps = this.pps ?: byteArrayOf()
       val audSize = if (codec == Codec.AVC) 6 else 7
       val videoHeader = vps.plus(sps).plus(pps)
-      val validBuffer = ByteBuffer.allocate(audSize + videoHeader.size + noHeaderBuffer.remaining())
+      val totalSize = audSize + videoHeader.size + noHeaderBuffer.remaining()
+      val validBuffer = ByteBuffer.allocate(totalSize)
       validBuffer.putInt(0x00000001)
       if (codec == Codec.AVC) {
         validBuffer.put(0x09.toByte())
@@ -135,7 +138,7 @@ class H26XPacket(
         validBuffer.put(0x50.toByte())
       }
       validBuffer.put(videoHeader)
-      validBuffer.put(noHeaderBuffer.toByteArray())
+      validBuffer.put(toByteArrayRemaining(noHeaderBuffer))
       validBuffer.rewind()
       configSend = true
       validBuffer
@@ -152,10 +155,17 @@ class H26XPacket(
       val validBuffer = ByteBuffer.allocate(byteBuffer.remaining() + 4)
       validBuffer.putInt(0x00000001)
       validBuffer.put(byteBuffer)
-      validBuffer.toByteArray()
+      toByteArrayRemaining(validBuffer)
     } else {
-      byteBuffer.toByteArray()
+      toByteArrayRemaining(byteBuffer)
     }
+  }
+
+  private fun toByteArrayRemaining(buffer: ByteBuffer): ByteArray {
+    val dup = buffer.slice()
+    val out = ByteArray(dup.remaining())
+    dup.get(out)
+    return out
   }
 
   private fun removeHeader(byteBuffer: ByteBuffer, isKeyFrame: Boolean): ByteBuffer {
