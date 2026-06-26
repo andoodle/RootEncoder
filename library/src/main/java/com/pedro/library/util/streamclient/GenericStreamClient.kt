@@ -173,6 +173,8 @@ class GenericStreamClient(
 
   override fun getItemsInCache(): Int = connectedStreamClient?.getItemsInCache() ?: 0
 
+  override fun getInboundSilenceMs(): Long = connectedStreamClient?.getInboundSilenceMs() ?: -1L
+
   override fun getSentAudioFrames(): Long = connectedStreamClient?.getSentAudioFrames() ?: 0
 
   override fun getSentVideoFrames(): Long = connectedStreamClient?.getSentVideoFrames() ?: 0
