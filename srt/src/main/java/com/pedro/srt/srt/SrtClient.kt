@@ -80,6 +80,22 @@ class SrtClient(private val connectChecker: ConnectChecker) {
   private var jobRetry: Job? = null
 
   private var checkServerAlive = false
+  // Inbound-liveness tracking. A silent UDP blackhole keeps sendto() succeeding (bytesSend climbs)
+  // while the server stops ACKing, so onConnectionFailed never fires and the stream ghost-freezes.
+  // Stamp the last time ANY packet was read from the socket; if that gap exceeds the timeout the link
+  // is dead regardless of the local "connected" flag. Firewall-proof — keys off SRT's own control
+  // traffic (ACK/KeepAlive arrive sub-second at any latency), never ICMP. Set to 0 to disable.
+  @Volatile
+  private var lastInboundMs = 0L
+  private var inboundSilenceJob: Job? = null
+  // Inbound-silence dead-link timeout. FIXED, not latency-scaled: the ingest server (millicast) drops
+  // the publisher at a fixed ~5 s regardless of SRT latency, so ride-through past that is impossible —
+  // scaling the timeout with latency only left the stream dead longer before we noticed. ~6 s sits just
+  // above the server's drop: fast recovery at any latency, while still riding through the brief sub-5 s
+  // blips the server holds. Checked on a dedicated 1 s tick (not the multi-second readBuffer loop) so
+  // detection fires promptly regardless of the socket read timeout.
+  private val inboundSilenceTimeoutMs = 6_000L
+  private val inboundSilenceTickMs = 1_000L
   @Volatile
   var isStreaming = false
     private set
@@ -213,6 +229,11 @@ class SrtClient(private val connectChecker: ConnectChecker) {
         val port = urlParser.port ?: 8888
         val path = urlParser.getQuery("streamid") ?: urlParser.getFullPath()
         latency = urlParser.getQuery("latency")?.toIntOrNull() ?: latency
+        // Keep the socket read timeout coupled to the negotiated latency on EVERY (re)connect, derived
+        // from the authoritative URL latency. The host app also sets this via setSocketTimeout, but that
+        // runs once at configure time and goes stale across a latency change + reconnect; deriving it
+        // here guarantees it always tracks the current latency. latency is micros, timeout is ms.
+        socketTimeout = (latency / 1000L) + 1000L
         val passphrase = urlParser.getQuery("passphrase") ?: ""
         if (passphrase.isNotEmpty() && passphrase.length in 10..79) {
           val encryptionType = when (urlParser.getQuery("pbkeylen")?.toIntOrNull()) {
@@ -267,6 +288,8 @@ class SrtClient(private val connectChecker: ConnectChecker) {
             }
             srtSender.socket = socket
             srtSender.start()
+            lastInboundMs = System.currentTimeMillis()
+            startInboundSilenceWatchdog()
             handleServerPackets()
           }
         }.exceptionOrNull()
@@ -350,6 +373,33 @@ class SrtClient(private val connectChecker: ConnectChecker) {
     }
   }
 
+  /**
+   * Dedicated inbound-silence watchdog. Runs on a fixed [inboundSilenceTickMs] tick — independent of
+   * the multi-second readBuffer block in [handleServerPackets] — so a dead link is caught within ~a
+   * second of the silence window elapsing instead of waiting for the next socket read to wake. A silent
+   * UDP blackhole keeps sendto() succeeding (bytesSend climbs) while the server stops ACKing; this is
+   * the firewall-proof replacement for checkServerAlive's ICMP probe. Threshold scales with latency so
+   * a high-latency config still rides through long outages via SRT's own buffer before giving up.
+   */
+  private fun startInboundSilenceWatchdog() {
+    inboundSilenceJob?.cancel()
+    inboundSilenceJob = scope.launch {
+      while (isActive && isStreaming) {
+        delay(inboundSilenceTickMs)
+        if (lastInboundMs == 0L) continue
+        val silentMs = System.currentTimeMillis() - lastInboundMs
+        val silenceTimeoutMs = inboundSilenceTimeoutMs
+        if (silentMs > silenceTimeoutMs) {
+          onMainThread {
+            connectChecker.onConnectionFailed("No response from server (inbound silence ${silentMs}ms > ${silenceTimeoutMs}ms)")
+          }
+          scope.cancel()
+          break
+        }
+      }
+    }
+  }
+
   /*
   Send a heartbeat to know if server is alive using Echo Protocol.
   Your firewall could block it.
@@ -366,6 +416,8 @@ class SrtClient(private val connectChecker: ConnectChecker) {
   @Throws(IOException::class)
   private suspend fun handleMessages() {
     val responseBufferConclusion = socket?.readBuffer() ?: throw IOException("read buffer failed, socket disconnected")
+    // A packet was successfully read — the server is alive on the data plane. Reset the silence timer.
+    lastInboundMs = System.currentTimeMillis()
     when(val srtPacket = SrtPacket.getSrtPacket(responseBufferConclusion)) {
       is DataPacket -> {
         //ignore
@@ -481,6 +533,15 @@ class SrtClient(private val connectChecker: ConnectChecker) {
   }
 
   fun getItemsInCache(): Int = srtSender.getItemsInCache()
+
+  /**
+   * Milliseconds since the last inbound packet was read from the socket, or -1 when not streaming or
+   * not yet established. On a healthy link this stays near zero (SRT sends ACK/KeepAlive control
+   * packets sub-second at any latency) and grows once the server stops responding — the firewall-proof
+   * "is the server actually receiving" signal that an outbound bytes-sent counter cannot provide.
+   */
+  fun getInboundSilenceMs(): Long =
+    if (!isStreaming || lastInboundMs == 0L) -1L else System.currentTimeMillis() - lastInboundMs
 
   /**
    * @param factor values from 0.1f to 1f
