@@ -212,6 +212,15 @@ open class OpenGlView : SurfaceView, GlInterface, OnFrameAvailableListener, Surf
         this.takePhotoCallback = takePhotoCallback
     }
 
+    override fun takePhoto(
+        width: Int?,
+        height: Int?,
+        takePhotoCallback: TakePhotoCallback?
+    ) {
+        this.takePhotoCallback = takePhotoCallback
+    }
+
+
     private fun draw(forced: Boolean) {
         if (!isRunning) return
         val limitFps = fpsLimiter.limitFPS()
