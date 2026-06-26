@@ -72,6 +72,9 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   private int level = -1;
   private final SpsColorPatcher spsColorPatcher = new SpsColorPatcher();
   private boolean forceBt709Color = false;
+  // GPX fork patch (graft from alexsafe f26cd13abb): allow forcing VBR bitrate mode. Used for the
+  // record encoder so VOD recordings use VBR rather than CBR. Toggled via setTryForceVBRBitrateMode.
+  private boolean tryForceVBRBitrateMode = false;
 
   public VideoEncoder(GetVideoData getVideoData) {
     this.getVideoData = getVideoData;
@@ -155,6 +158,13 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
       } else {
         Log.i(TAG, "bitrate mode CBR not supported using default mode");
       }
+      // GPX fork patch (graft): when requested, override the mode above with VBR (e.g. for the
+      // record encoder). Referenced by StreamBase.setTryForceVBRBitrateMode / prepareVideo.
+      if (tryForceVBRBitrateMode && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+        Log.i(TAG, "set bitrate mode VBR (forced)");
+        videoFormat.setInteger(MediaFormat.KEY_BITRATE_MODE,
+            MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR);
+      }
       // Rotation by encoder.
       // Removed because this is ignored by most encoders, producing different results on different devices
       //  videoFormat.setInteger(MediaFormat.KEY_ROTATION, rotation);
@@ -166,6 +176,13 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
       if (this.level > 0) {
         // MediaFormat.KEY_LEVEL, API > 23
         videoFormat.setInteger("level", this.level);
+      }
+      // GPX fork patch (graft): ask the encoder to prepend SPS/PPS to every IDR frame so FLV/VOD
+      // recordings stay seekable from any keyframe (pairs with the forced-keyframe-on-start patches).
+      if (type.equals(CodecUtil.H264_MIME) || type.equals(CodecUtil.H265_MIME)) {
+        try {
+          videoFormat.setInteger("prepend-sps-pps-to-idr-frames", 1);
+        } catch (Exception ignored) { }
       }
       // Set BT.709 color metadata so the encoder embeds correct VUI in the SPS NAL unit.
       // Without this, devices default to smpte170m/bt470bg which ffprobe/players read incorrectly.
@@ -257,6 +274,12 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
         Log.e(TAG, "encoder need be running", e);
       }
     }
+  }
+
+  // GPX fork patch (graft from alexsafe f26cd13abb): force VBR bitrate mode on the next
+  // prepareVideoEncoder. Used by StreamBase for the record encoder.
+  public void setTryForceVBRBitrateMode(boolean tryForceVBRBitrateMode) {
+    this.tryForceVBRBitrateMode = tryForceVBRBitrateMode;
   }
 
   @RequiresApi(api = Build.VERSION_CODES.KITKAT)

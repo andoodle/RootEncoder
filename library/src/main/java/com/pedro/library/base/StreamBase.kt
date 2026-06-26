@@ -21,6 +21,7 @@ import android.graphics.SurfaceTexture
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.os.Build
+import android.util.Log
 import android.util.Size
 import android.view.Surface
 import android.view.SurfaceView
@@ -84,6 +85,8 @@ abstract class StreamBase(
   //video/audio record
   private var recordController: RecordController = AndroidMuxerRecordController()
   private val fpsListener = FpsListener()
+  private var lastVideoFormat: MediaFormat? = null
+  private var lastAudioFormat: MediaFormat? = null
   var isStreaming = false
     private set
   var isOnPreview = false
@@ -143,6 +146,7 @@ abstract class StreamBase(
       glInterface.setCameraOrientation(if (rotation == 0) 270 else rotation - 90)
       glInterface.setOrientationConfig(videoSource.getOrientationConfig())
       if (differentRecordResolution) {
+          videoEncoderRecord.setTryForceVBRBitrateMode(true)
         val result = videoEncoderRecord.prepareVideoEncoder(recordWidth, recordHeight, fps, recordBitrate, rotation,
           iFrameInterval, FormatVideoEncoder.SURFACE, profile, level)
         if (!result) return false
@@ -154,6 +158,49 @@ abstract class StreamBase(
     }
     return false
   }
+
+    fun prepareVideo(
+        width: Int, height: Int, bitrate: Int, fps: Int = 30, iFrameInterval: Int = 2,
+        rotation: Int = 0, profile: Int = -1, level: Int = -1,
+        recordWidth: Int = 0, recordHeight: Int = 0, recordBitrate: Int = bitrate,
+        recordCodec: VideoCodec = VideoCodec.H264
+    ): Boolean {
+        if (isStreaming || isRecording || isOnPreview) {
+            throw IllegalStateException("Stream, record and preview must be stopped before prepareVideo")
+        }
+        differentRecordResolution = false
+        if (recordWidth > 0 && recordHeight > 0) {
+            if (recordWidth.toDouble() / recordHeight.toDouble() != width.toDouble() / height.toDouble()) {
+                throw IllegalArgumentException("The aspect ratio of record and stream resolution must be the same")
+            }
+            differentRecordResolution = true
+        }
+        val videoResult = videoSource.init(max(width, recordWidth), max(height, recordHeight), fps, rotation)
+        if (videoResult) {
+            if (differentRecordResolution) {
+                //using different record resolution
+                if (rotation == 90 || rotation == 270) glInterface.setEncoderRecordSize(recordHeight, recordWidth)
+                else glInterface.setEncoderRecordSize(recordWidth, recordHeight)
+            }
+            if (rotation == 90 || rotation == 270) glInterface.setEncoderSize(height, width)
+            else glInterface.setEncoderSize(width, height)
+            val isPortrait = rotation == 90 || rotation == 270
+            glInterface.setIsPortrait(isPortrait)
+            glInterface.setCameraOrientation(if (rotation == 0) 270 else rotation - 90)
+            glInterface.setOrientationConfig(videoSource.getOrientationConfig())
+            if (differentRecordResolution) {
+//                videoEncoderRecord.setTryForceVBRBitrateMode(true)
+                val result = videoEncoderRecord.prepareVideoEncoder(recordWidth, recordHeight, fps, recordBitrate, rotation,
+                    iFrameInterval, FormatVideoEncoder.SURFACE, profile, level)
+                if (!result) return false
+            }
+            val result = videoEncoder.prepareVideoEncoder(width, height, fps, bitrate, rotation,
+                iFrameInterval, FormatVideoEncoder.SURFACE, profile, level)
+            forceFpsLimit(true)
+            return result
+        }
+        return false
+    }
 
   /**
    * Necessary only one time before start stream or record.
@@ -186,8 +233,8 @@ abstract class StreamBase(
     if (isStreaming) throw IllegalStateException("Stream already started, stopStream before startStream again")
     isStreaming = true
     startStreamImp(endPoint)
-    if (!isRecording) startSources()
-    else requestKeyframe()
+      if (!isRecording)  startSources()
+    requestKeyframe()
   }
 
   /**
@@ -231,7 +278,7 @@ abstract class StreamBase(
    */
   fun forceCodecType(codecTypeVideo: CodecUtil.CodecType, codecTypeAudio: CodecUtil.CodecType) {
     videoEncoder.forceCodecType(codecTypeVideo)
-    videoEncoderRecord.forceCodecType(codecTypeVideo)
+//    videoEncoderRecord.forceCodecType(codecTypeVideo)
     audioEncoder.forceCodecType(codecTypeAudio)
   }
 
@@ -264,12 +311,14 @@ abstract class StreamBase(
     val usedTracks = tracks ?: if (videoSource is NoVideoSource) RecordController.RecordTracks.AUDIO
         else if (audioSource is NoAudioSource) RecordController.RecordTracks.VIDEO
         else RecordController.RecordTracks.ALL
+//      recordController.setVideoCodec(VideoCodec.H264)
     recordController.setRequestKeyFrame {
       videoEncoder.requestKeyframe()
       videoEncoderRecord.requestKeyframe()
     }
     recordController.startRecord(path, listener, usedTracks)
     if (!isStreaming) startSources()
+    requestKeyframe()
   }
 
   /**
@@ -489,6 +538,13 @@ abstract class StreamBase(
     if (!isRecording) {
       recordController.updateInfo(this.recordController.getVideoCodec(), this.recordController.getAudioCodec())
       this.recordController = recordController
+      // If streaming is already running, the new record controller won't receive initial formats.
+      // Replay the latest formats so it can build codec config (SPS/PPS) immediately.
+      lastAudioFormat?.let { this.recordController.setAudioFormat(it) }
+      lastVideoFormat?.let { this.recordController.setVideoFormat(it) }
+      if (isStreaming) {
+        requestKeyframe()
+      }
     }
   }
 
@@ -588,6 +644,7 @@ abstract class StreamBase(
     }
 
     override fun onAudioFormat(mediaFormat: MediaFormat) {
+      lastAudioFormat = mediaFormat
       recordController.setAudioFormat(mediaFormat)
     }
   }
@@ -605,6 +662,7 @@ abstract class StreamBase(
 
     override fun onVideoFormat(mediaFormat: MediaFormat) {
       if (!differentRecordResolution) {
+        lastVideoFormat = mediaFormat
         recordController.setVideoFormat(mediaFormat)
       }
     }
@@ -619,6 +677,7 @@ abstract class StreamBase(
     }
 
     override fun onVideoFormat(mediaFormat: MediaFormat) {
+      lastVideoFormat = mediaFormat
       recordController.setVideoFormat(mediaFormat)
     }
   }
@@ -632,20 +691,47 @@ abstract class StreamBase(
 
   abstract fun getStreamClient(): StreamBaseClient
 
+    fun setTryForceVBRBitrateMode(forVideoEncoder: Boolean, forVideoEncoderRecord: Boolean) {
+        if (forVideoEncoder) videoEncoder.setTryForceVBRBitrateMode(true)
+        if (forVideoEncoderRecord) videoEncoderRecord.setTryForceVBRBitrateMode(true)
+    }
+
+    fun setVideoRecCodec(codec: VideoCodec) {
+
+        recordController.setVideoCodec(codec)
+        val type = when (codec) {
+            VideoCodec.H264 -> CodecUtil.H264_MIME
+            VideoCodec.H265 -> CodecUtil.H265_MIME
+            VideoCodec.AV1 -> CodecUtil.AV1_MIME
+        }
+        CodecUtil.showAllCodecsInfo()
+//        videoEncoderRecord.setTryForceVBRBitrateMode(true)
+//        videoEncoderRecord.
+        videoEncoderRecord.type = type
+    }
+
+
   /**
    * Change VideoCodec used.
    * This could fail depend of the Codec supported in each Protocol. For example AV1 is not supported in SRT
    */
   fun setVideoCodec(codec: VideoCodec) {
     setVideoCodecImp(codec)
-    recordController.setVideoCodec(codec)
     val type = when (codec) {
       VideoCodec.H264 -> CodecUtil.H264_MIME
       VideoCodec.H265 -> CodecUtil.H265_MIME
       VideoCodec.AV1 -> CodecUtil.AV1_MIME
     }
     videoEncoder.type = type
-    videoEncoderRecord.type = type
+    // Recording codec is controlled separately (e.g., setVideoRecCodec)
+    if (isStreaming) {
+      Log.i("StreamBase", "setVideoCodec: streaming active, resetting video encoder for codec=${codec.name}")
+      val resetOk = resetVideoEncoder()
+      if (!resetOk) {
+        throw IllegalStateException("Failed to reset video encoder after codec change")
+      }
+      requestKeyframe()
+    }
   }
 
   /**

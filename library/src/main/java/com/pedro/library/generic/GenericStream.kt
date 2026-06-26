@@ -127,7 +127,7 @@ class GenericStream(
       udpClient.connect(endPoint)
     } else {
       onMainThreadHandler {
-        connectChecker.onConnectionFailed("Unsupported protocol. Only support rtmp, rtsp and srt")
+        connectChecker.onConnectionFailed("Unsupported protocol. Only support rtmp, rtsp and srt not $endPoint")
       }
     }
   }

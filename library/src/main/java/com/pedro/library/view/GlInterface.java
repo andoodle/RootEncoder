@@ -69,6 +69,8 @@ public interface GlInterface {
    * @param takePhotoCallback callback where you will get your image like a bitmap.
    */
   void takePhoto(TakePhotoCallback takePhotoCallback);
+  void takePhoto(Integer width, Integer height, TakePhotoCallback takePhotoCallback);
+
 
   /**
    * Replaces the filter at the specified position with the specified filter.

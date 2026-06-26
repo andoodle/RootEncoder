@@ -72,6 +72,10 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
   private var encoderHeight = 0
   private var encoderRecordWidth = 0
   private var encoderRecordHeight = 0
+  // GPX fork patch (graft from alexsafe f26cd13abb): photo capture size. Defaults to the encoder
+  // size but can be overridden via takePhoto(width, height, cb) for the app's VOD photo capture.
+  private var photoWidth = 0
+  private var photoHeight = 0
   private var streamOrientation = 0
   private var previewOrientation = 0
   private var previewWidth = 0
@@ -182,6 +186,16 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
 
   override fun takePhoto(takePhotoCallback: TakePhotoCallback?) {
     this.takePhotoCallback = takePhotoCallback
+    this.photoWidth = encoderWidth
+    this.photoHeight = encoderHeight
+  }
+
+  // GPX fork patch (graft from alexsafe f26cd13abb): capture a photo at an explicit size.
+  // The app calls takePhoto(recordWidth, recordHeight) { } for VOD photo capture.
+  override fun takePhoto(width: Int, height: Int, takePhotoCallback: TakePhotoCallback?) {
+    this.takePhotoCallback = takePhotoCallback
+    this.photoWidth = width
+    this.photoHeight = height
   }
 
   override fun start() {
@@ -305,9 +319,11 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
     //render surface photo if request photo
     if (takePhotoCallback != null && surfaceManagerPhoto.isReady && mainRender.isReady()) {
       if (surfaceManagerPhoto.makeCurrent()) {
-        mainRender.drawScreen(encoderWidth, encoderHeight, AspectRatioMode.NONE,
+        // GPX fork patch (graft): render/read at the requested photo size (photoWidth/photoHeight)
+        // instead of the encoder size, so takePhoto(width, height, cb) returns a correctly-sized bitmap.
+        mainRender.drawScreen(photoWidth, photoHeight, AspectRatioMode.NONE,
           streamOrientation, isStreamVerticalFlip, isStreamHorizontalFlip, streamViewPort)
-        takePhotoCallback?.onTakePhoto(GlUtil.getBitmap(encoderWidth, encoderHeight))
+        takePhotoCallback?.onTakePhoto(GlUtil.getBitmap(photoWidth, photoHeight))
         takePhotoCallback = null
         surfaceManagerPhoto.swapBuffer()
       }
