@@ -51,6 +51,8 @@ abstract class StreamBaseClient {
   abstract fun clearCache()
   abstract fun getCacheSize(): Int
   abstract fun getItemsInCache(): Int
+  /** Ms since the last inbound packet was read (SRT only); -1 when unknown / unsupported. */
+  open fun getInboundSilenceMs(): Long = -1L
   abstract fun getSentAudioFrames(): Long
   abstract fun getSentVideoFrames(): Long
   abstract fun getBytesSend(): Long

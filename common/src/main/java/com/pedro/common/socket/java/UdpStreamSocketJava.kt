@@ -117,4 +117,9 @@ class UdpStreamSocketJava(
     override fun isConnected(): Boolean = socket?.isConnected ?: false
 
     override fun isReachable(): Boolean = socket?.inetAddress?.isReachable(timeout.toInt()) ?: false
+
+    override fun setReadTimeout(timeoutMs: Long) {
+        this.timeout = timeoutMs
+        socket?.soTimeout = timeoutMs.toInt()
+    }
 }

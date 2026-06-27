@@ -35,6 +35,16 @@ abstract class StreamSocket {
   abstract fun isConnected(): Boolean
   abstract fun isReachable(): Boolean
 
+  /**
+   * Change the read timeout on a live socket. Used by the SRT handshake to poll on a short cadence
+   * while connecting, then restore the latency-derived timeout once streaming. The base impl only
+   * updates the field (honored on the next [connect]); the Java UDP socket overrides it to apply to
+   * the already-open socket's SO_TIMEOUT.
+   */
+  open fun setReadTimeout(timeoutMs: Long) {
+    this.timeout = timeoutMs
+  }
+
   companion object {
     const val DEFAULT_TIMEOUT = 5000L
     fun createTcpSocket(
