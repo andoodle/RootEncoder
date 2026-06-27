@@ -59,6 +59,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
+import java.net.SocketTimeoutException
 import java.net.URISyntaxException
 import java.nio.ByteBuffer
 
@@ -68,6 +69,21 @@ import java.nio.ByteBuffer
 class SrtClient(private val connectChecker: ConnectChecker) {
 
   private val TAG = "SrtClient"
+
+  // Handshake retransmit backoff (ms). The port historically sent each handshake ONCE and block-read
+  // the full latency-derived socketTimeout, so a single lost UDP packet cost the entire window and
+  // surfaced as "Poll timed out". We re-knock instead — but with EXPONENTIAL BACKOFF, not a fixed
+  // cadence, because the two failure modes pull opposite ways:
+  //   * cold lost-packet: wants a FAST re-knock (resend the dropped induction within ~250ms);
+  //   * millicast stale-session hold: the server holds the prior session after a relaunch and only
+  //     RELEASES during a lull — on-device, continuous 250ms knocking rode a full 11 s window with
+  //     ZERO response, and the attempt that finally latched was the one preceded by a multi-second
+  //     SILENT gap. So late in an attempt we want long quiet windows for the hold to release, then a
+  //     prompt re-knock to catch it.
+  // Backoff (250 -> 500 -> 1000 -> cap) serves both: fast cold-packet coverage early, lengthening
+  // silence later. HANDSHAKE_RETRANSMIT_MS is also the socket read timeout (the poll granularity).
+  private val HANDSHAKE_RETRANSMIT_MS = 250L
+  private val HANDSHAKE_RETRANSMIT_CAP_MS = 2_000L
 
   private val validSchemes = arrayOf("srt")
 
@@ -253,14 +269,22 @@ class SrtClient(private val connectChecker: ConnectChecker) {
         commandsManager.host = host
 
         val error = runCatching {
-          socket = SrtSocket(socketType, host, port, socketTimeout)
+          // Open the handshake socket with a SHORT read timeout so a missed reply re-knocks on the
+          // HANDSHAKE_RETRANSMIT_MS cadence instead of blocking the whole latency window on one packet.
+          socket = SrtSocket(socketType, host, port, HANDSHAKE_RETRANSMIT_MS)
           socket?.connect()
           commandsManager.loadStartTs()
 
-          commandsManager.writeHandshake(socket)
-          val response = commandsManager.readHandshake(socket)
+          // Total knock budget = the latency-derived socketTimeout the single block-read used to
+          // consume. We now re-send within this window instead of waiting it all out on one packet.
+          val handshakeDeadlineMs = System.currentTimeMillis() + socketTimeout
 
-          commandsManager.writeHandshake(socket, response.copy(
+          // INDUCTION — re-knock until the server replies (or the budget runs out).
+          val response = pollHandshake(handshakeDeadlineMs, "induction") {
+            commandsManager.writeHandshake(socket)
+          } ?: throw SocketTimeoutException("Poll timed out (no induction response in ${socketTimeout}ms)")
+
+          val conclusion = response.copy(
             encryption = commandsManager.getEncryptType(),
             extensionField = ExtensionField.calculateValue(response.extensionField, commandsManager.encryptionEnabled()),
             handshakeType = HandshakeType.CONCLUSION,
@@ -272,8 +296,12 @@ class SrtClient(private val connectChecker: ConnectChecker) {
               senderDelay = latency / 1000,
               path = path,
               encryptInfo = commandsManager.getEncryptInfo()
-            )))
-          val responseConclusion = commandsManager.readHandshake(socket)
+            ))
+          // CONCLUSION — re-knock until the matching CONCLUSION (or an error reject) arrives; stale
+          // INDUCTION echoes buffered from earlier retransmits are skipped by pollHandshake.
+          val responseConclusion = pollHandshake(handshakeDeadlineMs, "conclusion", HandshakeType.CONCLUSION) {
+            commandsManager.writeHandshake(socket, conclusion)
+          } ?: throw SocketTimeoutException("Poll timed out (no conclusion response in ${socketTimeout}ms)")
           if (responseConclusion.isErrorType()) {
             onMainThread {
               connectChecker.onConnectionFailed("Error configure stream, ${responseConclusion.handshakeType.name}")
@@ -283,6 +311,9 @@ class SrtClient(private val connectChecker: ConnectChecker) {
             commandsManager.socketId = responseConclusion.srtSocketId
             commandsManager.MTU = responseConclusion.MTU
             commandsManager.sequenceNumber = responseConclusion.initialPacketSequence
+            // Handshake established — restore the latency-derived read timeout so the streaming
+            // read-loop poll cadence is unchanged from the validated recovery behavior.
+            socket?.setReadTimeout(socketTimeout)
             onMainThread {
               connectChecker.onConnectionSuccess()
             }
@@ -302,6 +333,59 @@ class SrtClient(private val connectChecker: ConnectChecker) {
         }
       }
     }
+  }
+
+  /**
+   * Send a handshake via [send] and poll for its reply, retransmitting every [HANDSHAKE_RETRANSMIT_MS]
+   * (the socket's short read timeout) until a usable reply arrives or [deadlineMs] passes; returns
+   * null on timeout. Fixes the single-shot handshake weakness: a dropped induction/conclusion packet
+   * is re-sent within ~250ms, and a millicast stale-session hold latches the instant the server
+   * releases it — instead of every miss costing the full latency window ("Poll timed out").
+   *
+   * [acceptType] gates which reply ends the loop: handshakes of other types (e.g. stale INDUCTION
+   * echoes buffered from earlier retransmits during the conclusion phase) are skipped. Error-type
+   * handshakes always end the loop so a server rejection surfaces. Pass null to accept the first
+   * handshake of any type (induction phase).
+   *
+   * Re-send is time-based with exponential backoff (250 -> 500 -> 1000 -> [HANDSHAKE_RETRANSMIT_CAP_MS])
+   * rather than once-per-read, so that a stray non-handshake datagram — a DataPacket from a millicast
+   * stale session that hasn't fully released yet, which [CommandsManager.readHandshake] throws on — is
+   * drained and skipped instead of aborting the whole connect, while the knock continues on its
+   * backoff schedule. Riding the full window (instead of failing fast on one stray packet) lets a
+   * single attempt catch a late server release.
+   */
+  private suspend fun pollHandshake(
+    deadlineMs: Long,
+    phase: String,
+    acceptType: HandshakeType? = null,
+    send: suspend () -> Unit,
+  ): Handshake? {
+    var lastSendMs = 0L
+    var gapMs = HANDSHAKE_RETRANSMIT_MS
+    while (scope.isActive && System.currentTimeMillis() < deadlineMs) {
+      val now = System.currentTimeMillis()
+      if (lastSendMs == 0L || now - lastSendMs >= gapMs) {
+        send() // first knock, or re-knock once the (growing) backoff gap elapses
+        if (lastSendMs != 0L) gapMs = (gapMs * 2).coerceAtMost(HANDSHAKE_RETRANSMIT_CAP_MS)
+        lastSendMs = now
+      }
+      val handshake = try {
+        commandsManager.readHandshake(socket)
+      } catch (_: SocketTimeoutException) {
+        continue // short read window elapsed with no reply — loop re-knocks on the backoff above
+      } catch (e: IOException) {
+        // A non-handshake datagram (stale-session DataPacket) landed mid-handshake; skip it and
+        // keep polling rather than failing the connect. Re-raise anything that isn't that case.
+        if (e.message?.contains("unexpected response type") != true) throw e
+        Log.i(TAG, "skip non-handshake packet during $phase: ${e.message}")
+        continue
+      }
+      if (acceptType == null || handshake.isErrorType() || handshake.handshakeType == acceptType) {
+        return handshake
+      }
+      Log.i(TAG, "skip stale $phase handshake: ${handshake.handshakeType.name}")
+    }
+    return null
   }
 
   fun disconnect() {
