@@ -52,6 +52,10 @@ public abstract class BaseEncoder implements EncoderCallback {
   protected volatile long presentTimeUs;
   protected volatile boolean running = false;
   protected boolean isBufferMode = true;
+  // When true, timestamp baselines are preserved across stop/start cycles so the output PTS stays
+  // monotonic across a restart (e.g. reconnect recovery) instead of rebasing to zero. See
+  // forceContinuousTs(). Subclasses keep their own rebase reference (firstTimestamp / tsBuffer).
+  protected volatile boolean forceContinuousTs = false;
   protected CodecUtil.CodecType codecType = CodecUtil.CodecType.FIRST_COMPATIBLE_FOUND;
   private MediaCodec.Callback callback;
   private volatile long oldTimeStamp = 0L;
@@ -87,13 +91,24 @@ public abstract class BaseEncoder implements EncoderCallback {
 
   public void start(long startTs) {
     if (!prepared) throw new IllegalStateException(TAG + " not prepared yet. You must call prepare method before start it");
-    presentTimeUs = startTs;
+    // Continuous mode keeps the original baseline so the PTS continues across a restart; otherwise
+    // each start rebases to the supplied timestamp (original behavior).
+    if (!forceContinuousTs || presentTimeUs == 0) presentTimeUs = startTs;
     start(true);
     initCodec();
   }
 
   public void start() {
     start(TimeUtils.getCurrentTimeMicro());
+  }
+
+  /**
+   * Preserve the timestamp baseline across stop/start cycles so the output PTS stays monotonic
+   * across a restart (e.g. SRT reconnect recovery) instead of rebasing to zero. Without it, an HLS
+   * packager downstream sees a backward timestamp jump and emits a discontinuity. Default false.
+   */
+  public void forceContinuousTs(boolean force) {
+    this.forceContinuousTs = force;
   }
 
   protected void setCallback() {
@@ -164,7 +179,7 @@ public abstract class BaseEncoder implements EncoderCallback {
   }
 
   public void stop(boolean resetTs) {
-    if (resetTs) {
+    if (resetTs && !forceContinuousTs) {
       presentTimeUs = 0;
     }
     running = false;

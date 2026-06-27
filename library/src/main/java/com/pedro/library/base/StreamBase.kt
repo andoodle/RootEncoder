@@ -260,6 +260,20 @@ abstract class StreamBase(
   }
 
   /**
+   * Keep encoder timestamps continuous (monotonic) across stop/start cycles such as SRT reconnect
+   * recovery. Without it, every [startStream] rebases the encoder PTS to zero, which an HLS packager
+   * downstream (e.g. Cloudflare Stream / Vbrick) sees as a backward timestamp jump and turns into a
+   * visible discontinuity (segment loop / stall / refresh failure) for viewers. Default disabled.
+   *
+   * Must be called after prepareVideo/prepareAudio. Idempotent.
+   */
+  fun setContinuousTimestamp(enabled: Boolean) {
+    videoEncoder.forceContinuousTs(enabled)
+    videoEncoderRecord.forceContinuousTs(enabled)
+    audioEncoder.forceContinuousTs(enabled)
+  }
+
+  /**
    * Force stream to work with fps selected in prepareVideo method. Must be called before prepareVideo.
    * Must be called after prepareVideo
    *
