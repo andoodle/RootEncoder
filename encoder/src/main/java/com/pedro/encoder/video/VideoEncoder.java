@@ -212,7 +212,7 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
 
   @Override
   public void start(boolean resetTs) {
-    if (resetTs) firstTimestamp = 0;
+    if (resetTs && !forceContinuousTs) firstTimestamp = 0;
     forceKey = false;
     shouldReset = resetTs;
     spsPpsSetted = false;
