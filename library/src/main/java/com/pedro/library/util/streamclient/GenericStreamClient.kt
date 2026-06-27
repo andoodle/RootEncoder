@@ -179,6 +179,8 @@ class GenericStreamClient(
 
   override fun getBytesSend(): Long = connectedStreamClient?.getBytesSend() ?: 0
 
+  override fun getInboundSilenceMs(): Long = connectedStreamClient?.getInboundSilenceMs() ?: -1L
+
   override fun getDroppedAudioFrames(): Long = connectedStreamClient?.getDroppedAudioFrames() ?: 0
 
   override fun getDroppedVideoFrames(): Long = connectedStreamClient?.getDroppedVideoFrames() ?: 0

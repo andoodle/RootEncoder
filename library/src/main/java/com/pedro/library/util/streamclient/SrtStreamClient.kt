@@ -95,6 +95,9 @@ class SrtStreamClient(
 
   override fun getBytesSend(): Long = srtClient.bytesSend
 
+  /** ms since the last inbound SRT control packet, or -1 when not streaming. (test14ai) */
+  override fun getInboundSilenceMs(): Long = srtClient.getInboundSilenceMs()
+
   override fun getDroppedAudioFrames(): Long = srtClient.droppedAudioFrames
 
   override fun getDroppedVideoFrames(): Long = srtClient.droppedVideoFrames

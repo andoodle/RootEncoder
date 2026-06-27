@@ -54,6 +54,8 @@ abstract class StreamBaseClient {
   abstract fun getSentAudioFrames(): Long
   abstract fun getSentVideoFrames(): Long
   abstract fun getBytesSend(): Long
+  /** ms since the last inbound SRT control packet; -1 when not applicable. Default for non-SRT protocols. (test14ai) */
+  open fun getInboundSilenceMs(): Long = -1L
   abstract fun getDroppedAudioFrames(): Long
   abstract fun getDroppedVideoFrames(): Long
   abstract fun resetSentAudioFrames()

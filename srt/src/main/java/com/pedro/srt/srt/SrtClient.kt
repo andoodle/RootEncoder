@@ -88,6 +88,19 @@ class SrtClient(private val connectChecker: ConnectChecker) {
   private var numRetry = 0
   private var reTries = 0
 
+  // --- GPX SRT inbound-silence ghost-freeze detection (test14ai) ---
+  // During a silent UDP blackhole the route stays up: sendto() keeps succeeding and bytesSend keeps
+  // climbing, so the client believes it is still streaming while the server (millicast) has already
+  // dropped the publisher at a fixed ~5s. isAlive() is socket.isConnected() which is always true for
+  // UDP, and read timeouts are treated as non-fatal, so onConnectionFailed never fires -> permanent
+  // freeze. SRT's own inbound control packets (ACK/KeepAlive/Nak) stop arriving during a blackhole,
+  // so absence of inbound traffic is the firewall-proof liveness signal (unlike checkServerAlive's
+  // ICMP probe, which millicast blocks). Timeout is FIXED, not latency-scaled, to match the server.
+  private var lastInboundMs = 0L
+  private var inboundSilenceJob: Job? = null
+  private val inboundSilenceTimeoutMs = 5_500L
+  private val inboundSilenceTickMs = 1_000L
+
   val droppedAudioFrames: Long
     get() = srtSender.droppedAudioFrames
   val droppedVideoFrames: Long
@@ -213,6 +226,11 @@ class SrtClient(private val connectChecker: ConnectChecker) {
         val port = urlParser.port ?: 8888
         val path = urlParser.getQuery("streamid") ?: urlParser.getFullPath()
         latency = urlParser.getQuery("latency")?.toIntOrNull() ?: latency
+        // Derive the socket read timeout from the negotiated latency on EVERY connect (latency is in
+        // microseconds). Generous (latency/1000 + 1s) so a normal high-latency receive buffer never
+        // trips it; the read timeout stays non-fatal (see handleServerPackets) and only the
+        // inbound-silence watchdog declares a dead link. (test14ai)
+        socketTimeout = (latency / 1000L) + 1000L
         if (path.isEmpty()) {
           isStreaming = false
           onMainThread {
@@ -256,6 +274,10 @@ class SrtClient(private val connectChecker: ConnectChecker) {
             onMainThread {
               connectChecker.onConnectionSuccess()
             }
+            // Arm the inbound-silence baseline at connect and start its watchdog before entering the
+            // (blocking) server-packet loop, so the watchdog runs concurrently on the same scope. (test14ai)
+            lastInboundMs = System.currentTimeMillis()
+            startInboundSilenceWatchdog()
             srtSender.socket = socket
             srtSender.start()
             handleServerPackets()
@@ -354,9 +376,45 @@ class SrtClient(private val connectChecker: ConnectChecker) {
     return if (connected && !reachable) false else connected
   }
 
+  /**
+   * Inbound-silence watchdog (test14ai). Independent 1s-tick coroutine launched on connect. Once
+   * streaming, if no inbound SRT control packet has arrived within [inboundSilenceTimeoutMs] the link
+   * is treated as a silent blackhole and onConnectionFailed is raised so the app's recovery path can
+   * tear down and reconnect. This is the ONLY place that declares failure from silence; the socket
+   * read timeout stays non-fatal so a normal latency-buffer gap never resets the connection by itself.
+   */
+  private fun startInboundSilenceWatchdog() {
+    inboundSilenceJob?.cancel()
+    inboundSilenceJob = scope.launch {
+      while (isActive && isStreaming) {
+        delay(inboundSilenceTickMs)
+        if (!isStreaming || lastInboundMs == 0L) continue
+        val silentMs = System.currentTimeMillis() - lastInboundMs
+        if (silentMs > inboundSilenceTimeoutMs) {
+          onMainThread {
+            connectChecker.onConnectionFailed("No response from server (inbound silence ${silentMs}ms > ${inboundSilenceTimeoutMs}ms)")
+          }
+          scope.cancel()
+          break
+        }
+      }
+    }
+  }
+
+  /**
+   * Milliseconds since the last inbound SRT control packet, or -1 when not applicable (not streaming,
+   * or no baseline yet). Lets the app observe inbound liveness that the bytesSend counter cannot see:
+   * a blackhole still lets sendto() succeed, so only inbound silence reveals the dead link. (test14ai)
+   */
+  fun getInboundSilenceMs(): Long =
+    if (!isStreaming || lastInboundMs == 0L) -1L
+    else System.currentTimeMillis() - lastInboundMs
+
   @Throws(IOException::class)
   private suspend fun handleMessages() {
     val responseBufferConclusion = socket?.readBuffer() ?: throw IOException("read buffer failed, socket disconnected")
+    // Any successful inbound read means a server control packet arrived -> link is alive. (test14ai)
+    lastInboundMs = System.currentTimeMillis()
     when(val srtPacket = SrtPacket.getSrtPacket(responseBufferConclusion)) {
       is DataPacket -> {
         //ignore
