@@ -90,11 +90,11 @@ class SrtClient(private val connectChecker: ConnectChecker) {
   private var inboundSilenceJob: Job? = null
   // Inbound-silence dead-link timeout. FIXED, not latency-scaled: the ingest server (millicast) drops
   // the publisher at a fixed ~5 s regardless of SRT latency, so ride-through past that is impossible —
-  // scaling the timeout with latency only left the stream dead longer before we noticed. ~6 s sits just
-  // above the server's drop: fast recovery at any latency, while still riding through the brief sub-5 s
-  // blips the server holds. Checked on a dedicated 1 s tick (not the multi-second readBuffer loop) so
-  // detection fires promptly regardless of the socket read timeout.
-  private val inboundSilenceTimeoutMs = 6_000L
+  // scaling the timeout with latency only left the stream dead longer before we noticed. 5.5 s sits just
+  // above the server's ~5 s drop (0.5 s margin): fast recovery at any latency, while still riding through
+  // the brief sub-5 s blips the server holds. Checked on a dedicated 1 s tick (not the multi-second
+  // readBuffer loop) so detection fires promptly regardless of the socket read timeout.
+  private val inboundSilenceTimeoutMs = 5_500L
   private val inboundSilenceTickMs = 1_000L
   @Volatile
   var isStreaming = false
