@@ -9,7 +9,7 @@ dokka = "2.2.0"
 appcompat = "1.6.1"
 #noinspection GradleDependency, version 2.2.0 need min sdk 21
 constraintlayout = "2.1.4"
-ktor = "3.5.0"
+ktor = "3.5.1"
 #noinspection GradleDependency, version 1.6.0 need min sdk 23
 camerax = "1.5.3"
 multidex = "2.0.1"
@@ -19,6 +19,7 @@ junit = "4.13.2"
 mockito = "6.3.0"
 uvcandroid = "1.0.13"
 media3 = "1.10.1"
+bouncycastle = "1.81"
 
 [libraries]
 androidx-annotation = { module = "androidx.annotation:annotation", version.ref = "annotation" }
@@ -36,6 +37,9 @@ ktor-network-tls = { module = "io.ktor:ktor-network-tls", version.ref = "ktor" }
 mockito-kotlin = { module = "org.mockito.kotlin:mockito-kotlin", version.ref = "mockito" }
 uvcandroid = { module = "com.herohan:UVCAndroid", version.ref = "uvcandroid" }
 androidx-media3-inspector = { module = "androidx.media3:media3-inspector", version.ref = "media3" }
+bouncycastle-bcprov = { module = "org.bouncycastle:bcprov-jdk15to18", version.ref = "bouncycastle" }
+bouncycastle-bctls = { module = "org.bouncycastle:bctls-jdk15to18", version.ref = "bouncycastle" }
+bouncycastle-bcpkix = { module = "org.bouncycastle:bcpkix-jdk15to18", version.ref = "bouncycastle" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
