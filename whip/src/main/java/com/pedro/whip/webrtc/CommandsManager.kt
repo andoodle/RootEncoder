@@ -173,6 +173,7 @@ class CommandsManager {
         val body = createBody(
             videoSsrc, audioSsrc, uFrag, uPass, certificate.fingerprint
         )
+        Log.i(TAG, "WHIP offer SDP:\n$body")
         this.certificate = certificate
         localSdpInfo = SdpInfo(uFrag, uPass, certificate.fingerprint, listOf())
         // GPX patch: build the POST URI from the parsed scheme + full path (was hardcoded http:// + appName
@@ -279,16 +280,49 @@ class CommandsManager {
         return StunCommandReader.readPacket(data)
     }
 
+    // GPX patch: derive the H264 profile-level-id (e.g. "42801e") from the SPS bytes for the WebRTC
+    // fmtp. spsString is base64 of the SPS NAL: [0]=NAL header, [1]=profile_idc, [2]=profile_iop,
+    // [3]=level_idc. Browsers match/configure the decoder on this; without it framesDecoded stays 0.
+    private fun h264ProfileLevelId(): String? {
+        return try {
+            val sps = android.util.Base64.decode(spsString, android.util.Base64.NO_WRAP)
+            if (sps.size >= 4) {
+                val profileIdc = sps[1].toInt() and 0xFF
+                val profileIop = sps[2].toInt() and 0xFF
+                // Advertise at least level 3.1 (0x1f). The encoder's SPS reports level 3.0 (0x1e) but
+                // 960x540 (2040 macroblocks) exceeds L3.0's 1620 limit, so a browser that inits an L3.0
+                // decoder rejects the frames (framesDecoded stays 0). Browsers advertise H264 at level 1f;
+                // matching keeps the decode path valid. level-asymmetry-allowed=1 covers send/recv skew.
+                val levelIdc = maxOf(sps[3].toInt() and 0xFF, 0x1f)
+                "%02x%02x%02x".format(profileIdc, profileIop, levelIdc)
+            } else null
+        } catch (_: Exception) { null }
+    }
+
     private fun createBody(
         videoSsrc: Long, audioSsrc: Long,
         uFrag: String, uPass: String, fingerprint: String
     ): String {
         val cName = "RootEncoder"
+        // GPX patch: a single media-stream id + per-track ids so the SFU can forward our tracks to
+        // subscribers. Without msid an SFU (Millicast) still INGESTS fine (it sees the SSRCs) but has no
+        // named MediaStreamTrack to deliver to viewers -> healthy publish dashboard, black players.
+        val streamId = "gpxstream"
         var videoBody = ""
         if (!videoDisabled) {
             val media = when (videoCodec) {
                 VideoCodec.H264 -> {
-                    SdpBody.createH264Body(rtpTracks.trackVideo, spsString, ppsString, true)
+                    // GPX patch: WebRTC browsers REQUIRE profile-level-id in the H264 fmtp to configure
+                    // their decoder. SdpBody omits it (RTSP doesn't need it) -> the subscriber receives
+                    // video RTP but framesDecoded stays 0 (black). Inject the real profile-level-id read
+                    // from our SPS, plus level-asymmetry-allowed=1 (standard WebRTC).
+                    val pli = h264ProfileLevelId()
+                    SdpBody.createH264Body(rtpTracks.trackVideo, spsString, ppsString, true).let {
+                        if (pli != null) it.replaceFirst(
+                            "packetization-mode=1; sprop-parameter-sets=",
+                            "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=$pli;sprop-parameter-sets="
+                        ) else it
+                    }
                 }
                 VideoCodec.H265 -> {
                     SdpBody.createH265Body(rtpTracks.trackVideo, spsString, ppsString, vpsString, true)
@@ -296,10 +330,15 @@ class CommandsManager {
                 VideoCodec.AV1 -> {
                     SdpBody.createAV1Body(rtpTracks.trackVideo, true)
                 }
-            }
+            // GPX patch: m-line port 0 means "rejected media" in SDP. SdpBody hardcodes port 0 (an RTSP
+            // convention). For WebRTC the BUNDLE m-lines must use the discard port 9 or the SFU won't set
+            // up a forwardable track. RTSP path is untouched (this replace is whip-only).
+            }.replaceFirst("m=video 0 ", "m=video 9 ")
             videoBody = media +
                 "a=rtcp-mux\r\n" +
-                "a=ssrc:$videoSsrc cname:$cName\r\n"
+                "a=msid:$streamId gpxvideo\r\n" +
+                "a=ssrc:$videoSsrc cname:$cName\r\n" +
+                "a=ssrc:$videoSsrc msid:$streamId gpxvideo\r\n"
         }
         var audioBody = ""
         if (!audioDisabled) {
@@ -307,10 +346,12 @@ class CommandsManager {
                 AudioCodec.G711 -> SdpBody.createG711Body(rtpTracks.trackAudio, sampleRate, isStereo, true)
                 AudioCodec.OPUS -> SdpBody.createOpusBody(rtpTracks.trackAudio, true)
                 else  -> throw IllegalArgumentException("Unsupported codec: ${audioCodec.name}")
-            }
+            }.replaceFirst("m=audio 0 ", "m=audio 9 ")
             audioBody = media +
                 "a=rtcp-mux\r\n" +
-                "a=ssrc:$audioSsrc cname:$cName\r\n"
+                "a=msid:$streamId gpxaudio\r\n" +
+                "a=ssrc:$audioSsrc cname:$cName\r\n" +
+                "a=ssrc:$audioSsrc msid:$streamId gpxaudio\r\n"
         }
         val bundleMids = listOfNotNull(
             if (!videoDisabled) rtpTracks.trackVideo else null,
@@ -323,7 +364,7 @@ class CommandsManager {
                 "s=-\r\n" +
                 "t=0 0\r\n" +
                 "a=group:BUNDLE $bundleMids\r\n" +
-                "a=msid-semantic:WMS *\r\n" +
+                "a=msid-semantic: WMS $streamId\r\n" +
                 // GPX patch: offer setup:actpass (standard). The client now implements BOTH DTLS roles and
                 // picks from the answer's a=setup (DtlsClient when the SFU answers passive, DtlsConnection
                 // when it answers active). Millicast answers passive regardless, so we drive the handshake.
