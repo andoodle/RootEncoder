@@ -29,7 +29,9 @@ object SdpParser {
     val uPass = extractContent(body, "a=ice-pwd:")
     val fingerprint = extractContent(body, "a=fingerprint:sha-256")
     val candidates = extractCandidates(body)
-    return SdpInfo(uFrag, uPass, fingerprint, candidates)
+    // GPX patch: read the remote DTLS role so the client can decide who sends the ClientHello.
+    val setupRole = runCatching { extractContent(body, "a=setup:") }.getOrNull()
+    return SdpInfo(uFrag, uPass, fingerprint, candidates, setupRole)
   }
 
   private fun extractContent(sdp: String, content: String): String {

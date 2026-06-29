@@ -25,5 +25,8 @@ data class SdpInfo(
   val uFrag: String,
   val uPass: String,
   val fingerprint: String,
-  val candidates: List<Candidate>
+  val candidates: List<Candidate>,
+  // GPX patch: remote DTLS role from a=setup ("active" | "passive" | "actpass" | null).
+  // Drives which side sends the DTLS ClientHello. Default null for the locally-built offer info.
+  val setupRole: String? = null
 )

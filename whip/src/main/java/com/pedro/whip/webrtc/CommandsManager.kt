@@ -324,7 +324,11 @@ class CommandsManager {
                 "t=0 0\r\n" +
                 "a=group:BUNDLE $bundleMids\r\n" +
                 "a=msid-semantic:WMS *\r\n" +
-                "a=setup:actpass\r\n" +
+                // GPX patch: offer setup:passive (was actpass). The app implements only the DTLS SERVER
+                // role (DTLSServerProtocol.accept). Per RFC 8842 an offerer that says "passive" forces the
+                // answerer to "active", so the SFU sends the ClientHello and our server path completes.
+                // Millicast was answering "passive" to our actpass -> both sides server -> DTLS deadlock.
+                "a=setup:passive\r\n" +
                 "a=ice-ufrag:$uFrag\r\n" +
                 "a=ice-pwd:$uPass\r\n" +
                 "a=ice-options:trickle\r\n" +

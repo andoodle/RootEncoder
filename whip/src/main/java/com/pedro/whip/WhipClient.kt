@@ -61,6 +61,10 @@ class WhipClient(private val connectChecker: ConnectChecker) {
     //for secure transport
     private var tlsEnabled = false
     private var dtlsConnection: DtlsConnection? = null
+    // GPX patch: hold the ICE/media UDP socket so disconnect() can close it. Was a local val inside the
+    // connect job; on stop the blocking STUN read loop kept the socket alive and STUN kept flowing.
+    @Volatile
+    private var iceSocket: UdpStreamSocket? = null
     private val commandsManager: CommandsManager = CommandsManager()
     private val whipSender: WhipSender = WhipSender(connectChecker, commandsManager)
     private var url: String? = null
@@ -248,6 +252,13 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                     val port = remoteCandidates[0].getRealPort()
                     val socket = StreamSocket.createUdpSocket(socketType, host, port, socketTimeout, receiveSize = RtpConstants.MTU)
                     socket.connect()
+                    iceSocket = socket
+
+                    // GPX patch: log the negotiated DTLS role. We offer setup:passive, so a compliant SFU
+                    // answers setup:active and sends the ClientHello (our DTLSServerProtocol.accept path).
+                    // If the server keeps setup:passive, both sides wait and the DTLS step below will time
+                    // out with a clear "DTLS handshake failed" (no infinite hang).
+                    Log.i(TAG, "remote DTLS setup role: ${commandsManager.remoteSdpInfo?.setupRole}")
 
                     val requestId = commandsManager.generateTransactionId()
                     val userName = StunAttributeValueParser.createUserName(localFrag, remoteFrag)
@@ -258,20 +269,40 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                     )
                     commandsManager.writeStun(HeaderType.REQUEST, requestId, attributes, socket)
 
+                    // GPX patch: ICE binding-check with retransmit. The original sent ONE request then
+                    // blocked forever on readStun; against an ice-lite SFU (Millicast) that never acked our
+                    // single request the loop spun on the SFU's own checks, never nominated, never reached
+                    // DTLS -> connection up but zero media. Retransmit on a short timeout, bounded, then fail.
+                    val iceRtoMs = 500L
+                    val iceMaxAttempts = 14 // ~7s worst case
                     var candidateResponses = 0
                     var requestSuccessReceived = false
+                    var iceAttempts = 0
                     while (candidateResponses < 1 || !requestSuccessReceived) {
-                        val command = commandsManager.readStun(socket)
+                        val command = withTimeoutOrNull(iceRtoMs.milliseconds) { commandsManager.readStun(socket) }
+                        if (command == null) {
+                            if (++iceAttempts >= iceMaxAttempts) break
+                            commandsManager.writeStun(HeaderType.REQUEST, requestId, attributes, socket)
+                            continue
+                        }
                         if (command.header.id.contentEquals(requestId) && command.header.type == HeaderType.SUCCESS) {
                             requestSuccessReceived = true
                         } else if (command.header.type == HeaderType.REQUEST) {
                             candidateResponses++
                             val xorAddress = StunAttributeValueParser.createXorMappedAddress(command.header.id, host, port, true)
-                            val attributes = listOf(
+                            val responseAttributes = listOf(
                                 StunAttribute(AttributeType.XOR_MAPPED_ADDRESS, xorAddress)
                             )
-                            commandsManager.writeStun(HeaderType.SUCCESS, command.header.id, attributes, socket)
+                            commandsManager.writeStun(HeaderType.SUCCESS, command.header.id, responseAttributes, socket)
                         }
+                    }
+                    if (!requestSuccessReceived) {
+                        runCatching { socket.close() }
+                        iceSocket = null
+                        onMainThread {
+                            connectChecker.onConnectionFailed("ICE connectivity check failed (no STUN binding success from server)")
+                        }
+                        return@launch
                     }
 
                     val nominateId = commandsManager.generateTransactionId()
@@ -283,19 +314,34 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                     )
                     commandsManager.writeStun(HeaderType.REQUEST, nominateId, nominateAttributes, socket)
 
+                    // GPX patch: same retransmit treatment for the USE-CANDIDATE nomination.
                     var nominateSuccessReceived = false
+                    var nominateAttempts = 0
                     while (!nominateSuccessReceived) {
-                        val command = commandsManager.readStun(socket)
+                        val command = withTimeoutOrNull(iceRtoMs.milliseconds) { commandsManager.readStun(socket) }
+                        if (command == null) {
+                            if (++nominateAttempts >= iceMaxAttempts) break
+                            commandsManager.writeStun(HeaderType.REQUEST, nominateId, nominateAttributes, socket)
+                            continue
+                        }
                         if (command.header.id.contentEquals(nominateId) && command.header.type == HeaderType.SUCCESS) {
                             nominateSuccessReceived = true
                         } else if (command.header.type == HeaderType.REQUEST) {
                             candidateResponses++
                             val xorAddress = StunAttributeValueParser.createXorMappedAddress(command.header.id, host, port, true)
-                            val attributes = listOf(
+                            val responseAttributes = listOf(
                                 StunAttribute(AttributeType.XOR_MAPPED_ADDRESS, xorAddress)
                             )
-                            commandsManager.writeStun(HeaderType.SUCCESS, command.header.id, attributes, socket)
+                            commandsManager.writeStun(HeaderType.SUCCESS, command.header.id, responseAttributes, socket)
                         }
+                    }
+                    if (!nominateSuccessReceived) {
+                        runCatching { socket.close() }
+                        iceSocket = null
+                        onMainThread {
+                            connectChecker.onConnectionFailed("ICE nomination failed (no STUN success for USE-CANDIDATE)")
+                        }
+                        return@launch
                     }
 
                     val certificate = commandsManager.certificate ?: return@launch
@@ -392,6 +438,11 @@ class WhipClient(private val connectChecker: ConnectChecker) {
         if (isStreaming) whipSender.stop()
         dtlsConnection?.close()
         dtlsConnection = null
+        // GPX patch: close the ICE/media UDP socket so any in-flight STUN read unblocks and the OS stops
+        // ACKing the server's binding checks. Without this the connect job's read loop kept STUN alive
+        // after stopStream (server-side session lingered).
+        runCatching { iceSocket?.close() }
+        iceSocket = null
         val error = runCatching {
             //TODO write delete command
             Log.i(TAG, "write delete success")
