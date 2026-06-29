@@ -17,6 +17,7 @@ import com.pedro.common.toUInt32
 import com.pedro.common.validMessage
 import com.pedro.rtsp.utils.CryptoProperties
 import com.pedro.rtsp.utils.RtpConstants
+import com.pedro.whip.dtls.DtlsClient
 import com.pedro.whip.dtls.DtlsConnection
 import com.pedro.whip.dtls.DtlsTransport
 import com.pedro.whip.webrtc.CandidateType
@@ -61,10 +62,16 @@ class WhipClient(private val connectChecker: ConnectChecker) {
     //for secure transport
     private var tlsEnabled = false
     private var dtlsConnection: DtlsConnection? = null
+    // GPX patch: client-role DTLS handshaker, used when the SFU answers a=setup:passive (Millicast).
+    private var dtlsClient: DtlsClient? = null
     // GPX patch: hold the ICE/media UDP socket so disconnect() can close it. Was a local val inside the
     // connect job; on stop the blocking STUN read loop kept the socket alive and STUN kept flowing.
     @Volatile
     private var iceSocket: UdpStreamSocket? = null
+    // GPX debug: count media-plane (SRTP/SRTCP) packets received from the server after DTLS. For a
+    // send-only WHIP publisher these are the server's RTCP feedback (transport-cc/RR/PLI) — their
+    // presence proves the ingest is actually receiving our media, not just holding the ICE session.
+    private val mediaPlaneIn = java.util.concurrent.atomic.AtomicLong(0)
     private val commandsManager: CommandsManager = CommandsManager()
     private val whipSender: WhipSender = WhipSender(connectChecker, commandsManager)
     private var url: String? = null
@@ -347,9 +354,17 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                     val certificate = commandsManager.certificate ?: return@launch
                     val fingerprint = commandsManager.remoteSdpInfo?.fingerprint ?: return@launch
 
+                    // GPX patch: choose the DTLS role from the answer's a=setup. WHIP ingests (Millicast)
+                    // answer "passive" -> they are the DTLS server, so WE are the client and send the
+                    // ClientHello (DtlsClient). Only when the remote explicitly answers "active" do we keep
+                    // the original server-accept path (DtlsConnection). The SRTP write key index differs by
+                    // role: client writes with the client key [0], server with the server key [1].
+                    val remoteSetup = commandsManager.remoteSdpInfo?.setupRole
+                    val weAreServer = remoteSetup.equals("active", ignoreCase = true)
+                    Log.i(TAG, "DTLS role: ${if (weAreServer) "server(accept)" else "client(connect)"} (remote a=setup:$remoteSetup)")
+
                     val dtlsResult = CompletableDeferred<Result<List<CryptoProperties>>>()
                     val dtlsTransport = DtlsTransport(socket)
-                    dtlsConnection = DtlsConnection(certificate, fingerprint)
 
                     val dispatchJob = launch {
                         while (isActive) {
@@ -361,14 +376,27 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                         }
                     }
 
-                    dtlsConnection?.start(dtlsTransport, object : DtlsConnection.Callback {
-                        override fun onHandshakeComplete(properties: List<CryptoProperties>) {
-                            dtlsResult.complete(Result.success(properties))
-                        }
-                        override fun onHandshakeFailed(reason: String?) {
-                            dtlsResult.complete(Result.failure(Exception(reason ?: "DTLS handshake failed")))
-                        }
-                    })
+                    if (weAreServer) {
+                        dtlsConnection = DtlsConnection(certificate, fingerprint)
+                        dtlsConnection?.start(dtlsTransport, object : DtlsConnection.Callback {
+                            override fun onHandshakeComplete(properties: List<CryptoProperties>) {
+                                dtlsResult.complete(Result.success(properties))
+                            }
+                            override fun onHandshakeFailed(reason: String?) {
+                                dtlsResult.complete(Result.failure(Exception(reason ?: "DTLS handshake failed")))
+                            }
+                        })
+                    } else {
+                        dtlsClient = DtlsClient(certificate, fingerprint)
+                        dtlsClient?.start(dtlsTransport, object : DtlsClient.Callback {
+                            override fun onHandshakeComplete(properties: List<CryptoProperties>) {
+                                dtlsResult.complete(Result.success(properties))
+                            }
+                            override fun onHandshakeFailed(reason: String?) {
+                                dtlsResult.complete(Result.failure(Exception(reason ?: "DTLS handshake failed")))
+                            }
+                        })
+                    }
 
                     val result = withTimeoutOrNull(5_000.milliseconds) { dtlsResult.await() }
                         ?: Result.failure(Exception("timeout"))
@@ -377,6 +405,10 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                         dispatchJob.cancel()
                         dtlsConnection?.close()
                         dtlsConnection = null
+                        dtlsClient?.close()
+                        dtlsClient = null
+                        runCatching { socket.close() }
+                        iceSocket = null
                         onMainThread {
                             connectChecker.onConnectionFailed("DTLS handshake failed: ${result.exceptionOrNull()?.message}")
                         }
@@ -384,7 +416,8 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                     }
                     Log.i(TAG, "dtls connected!!")
                     onMainThread { connectChecker.onConnectionSuccess() }
-                    whipSender.setCrypto(cryptoProperties[1])
+                    // client writes with client key [0]; server writes with server key [1].
+                    whipSender.setCrypto(if (weAreServer) cryptoProperties[1] else cryptoProperties[0])
                     whipSender.setSocketsInfo(socket)
                     whipSender.start()
                 }.exceptionOrNull()
@@ -409,7 +442,12 @@ class WhipClient(private val connectChecker: ConnectChecker) {
         val first = bytes[0].toInt() and 0xFF
         when (first) {
             in 20..63 -> dtlsTransport.enqueue(bytes)
-            in 128..191 -> { /* RTP/RTCP – ignore after DTLS */ }
+            in 128..191 -> {
+                // RTP/RTCP – ignored for media (send-only), but counted: feedback here means the
+                // server is receiving our stream. GPX debug log, throttled.
+                val n = mediaPlaneIn.incrementAndGet()
+                if (n <= 5L || n % 50L == 0L) Log.i(TAG, "media-plane in from server: $n")
+            }
             else -> {
                 try {
                     val command = commandsManager.readStun(bytes)
@@ -438,6 +476,8 @@ class WhipClient(private val connectChecker: ConnectChecker) {
         if (isStreaming) whipSender.stop()
         dtlsConnection?.close()
         dtlsConnection = null
+        dtlsClient?.close()
+        dtlsClient = null
         // GPX patch: close the ICE/media UDP socket so any in-flight STUN read unblocks and the OS stops
         // ACKing the server's binding checks. Without this the connect job's read loop kept STUN alive
         // after stopStream (server-side session lingered).
