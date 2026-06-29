@@ -180,7 +180,16 @@ class CommandsManager {
         // only), send the Bearer token, and use TLS for https. Omit the default port for a clean URL.
         val scheme = if (tlsEnabled) "https" else "http"
         val portPart = if ((tlsEnabled && port == 443) || (!tlsEnabled && port == 80)) "" else ":$port"
-        val uri = "$scheme://$host$portPart/$app"
+        // GPX patch: tell Millicast which codec we publish via the WHIP URL (?codec=h264). Without it
+        // Millicast can set up a VP8/VP9 delivery pipeline and transcode our H264 -> the transcode of our
+        // Baseline/Qualcomm stream renders BLACK to subscribers even though ingest stats look healthy.
+        // (The fork strips the URL query for the POST and sends ?auth= as Bearer, so this must be re-added.)
+        val codecParam = when (videoCodec) {
+            VideoCodec.H264 -> "h264"
+            VideoCodec.H265 -> "h265"
+            VideoCodec.AV1 -> "av1"
+        }
+        val uri = "$scheme://$host$portPart/$app?codec=$codecParam"
         val path: String? = streamName
         val headers = mutableMapOf<String, String>().apply {
             put("Content-Type", "application/sdp")

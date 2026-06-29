@@ -514,7 +514,48 @@ class WhipClient(private val connectChecker: ConnectChecker) {
 
     fun sendVideo(videoBuffer: ByteBuffer, info: MediaCodec.BufferInfo) {
         if (!commandsManager.videoDisabled) {
-            whipSender.sendMediaFrame(MediaFrame(videoBuffer.clone(), info.toMediaFrameInfo(), MediaFrame.Type.VIDEO))
+            val cloned = videoBuffer.clone()
+            // GPX patch: raise the H264 in-band SPS level_idc to at least 3.1. This device's Qualcomm
+            // encoder reports level 3.0 for 960x540 (2040 macroblocks > L3.0's 1620 limit) -> the strict
+            // WebRTC hardware decoder decodes "successfully" but renders BLACK (RTMP/HLS tolerates it).
+            // One-byte SPS edit, no re-encode; matches the SDP profile-level-id (also forced >= L3.1).
+            patchH264SpsLevel(cloned)
+            whipSender.sendMediaFrame(MediaFrame(cloned, info.toMediaFrameInfo(), MediaFrame.Type.VIDEO))
+        }
+    }
+
+    @Volatile private var spsLevelPatched = false
+    // Raise the level_idc of an in-band H264 SPS (NAL type 7) to >= minLevel. Handles Annex-B start-code
+    // prefixed NALs and a bare SPS NAL. level_idc is a fixed u(8) right after the constraint byte, so the
+    // edit never shifts the rest of the SPS.
+    private fun patchH264SpsLevel(buf: ByteBuffer, minLevel: Int = 0x1f) {
+        val start = buf.position()
+        val end = buf.limit()
+        if (end - start >= 4 && (buf.get(start).toInt() and 0x9F) == 0x07) {
+            patchSpsLevelAt(buf, start + 3, minLevel)
+            return
+        }
+        var i = start
+        while (i + 6 < end) {
+            if (buf.get(i).toInt() == 0 && buf.get(i + 1).toInt() == 0 && buf.get(i + 2).toInt() == 1) {
+                if ((buf.get(i + 3).toInt() and 0x1F) == 7) {
+                    patchSpsLevelAt(buf, i + 6, minLevel)
+                    return
+                }
+                i += 3
+            } else i++
+        }
+    }
+
+    private fun patchSpsLevelAt(buf: ByteBuffer, levelIdx: Int, minLevel: Int) {
+        if (levelIdx >= buf.limit()) return
+        val cur = buf.get(levelIdx).toInt() and 0xFF
+        if (cur < minLevel) {
+            buf.put(levelIdx, minLevel.toByte())
+            if (!spsLevelPatched) {
+                Log.i(TAG, "patched in-band SPS level_idc 0x${cur.toString(16)} -> 0x${minLevel.toString(16)}")
+                spsLevelPatched = true
+            }
         }
     }
 

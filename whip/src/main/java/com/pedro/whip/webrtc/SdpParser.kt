@@ -35,8 +35,10 @@ object SdpParser {
   }
 
   private fun extractContent(sdp: String, content: String): String {
+    // GPX patch: lastOrNull (was last) so a malformed/error answer that lacks a field fails as a clean
+    // ICE/empty error downstream instead of throwing NoSuchElementException out of parseBodyAnswer.
     return sdp.lines()
-      .map { it.trim() }.last { it.startsWith(content, ignoreCase = true) }.removePrefix(content).trim()
+      .map { it.trim() }.lastOrNull { it.startsWith(content, ignoreCase = true) }?.removePrefix(content)?.trim() ?: ""
   }
 
   private fun extractCandidates(sdp: String): List<Candidate> {
