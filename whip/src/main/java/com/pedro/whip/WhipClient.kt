@@ -200,9 +200,9 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                 val port = urlParser.port ?: if (tlsEnabled) 443 else 8889
                 // GPX patch: standard WHIP — POST to the FULL endpoint path with a separate Bearer token
                 // (Millicast: /api/whip/<stream> + token), instead of pedro's appName-only POST with the
-                // last path segment used as the token. Token from ?token=, else setAuthorization.
+                // last path segment used as the token. Token from ?auth= (Millicast) / ?token=, else setAuthorization.
                 val path = urlParser.path.removePrefix("/")
-                val token = urlParser.getQuery("token") ?: authToken
+                val token = urlParser.getQuery("auth") ?: urlParser.getQuery("token") ?: authToken
                 if (path.isEmpty()) {
                     isStreaming = false
                     onMainThread {
