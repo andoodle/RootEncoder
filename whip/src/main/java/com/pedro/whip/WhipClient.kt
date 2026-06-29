@@ -45,7 +45,8 @@ class WhipClient(private val connectChecker: ConnectChecker) {
 
     private val TAG = "WhipClient"
 
-    private val validSchemes = arrayOf("http")
+    // GPX patch: accept https/whip (standard WHIP is https), not just plaintext http.
+    private val validSchemes = arrayOf("http", "https", "whip")
 
     private var scope = CoroutineScope(Dispatchers.IO)
     private var scopeRetry = CoroutineScope(Dispatchers.IO)
@@ -67,6 +68,9 @@ class WhipClient(private val connectChecker: ConnectChecker) {
     private var numRetry = 0
     private var reTries = 0
     private var checkServerAlive = false
+    // GPX patch: bearer token for standard-WHIP auth (e.g. Millicast publishing token). Set via
+    // setAuthorization, or read from the URL ?token= / userinfo at connect.
+    private var authToken: String? = null
     var socketType = SocketType.KTOR
 
     val droppedAudioFrames: Long
@@ -89,7 +93,9 @@ class WhipClient(private val connectChecker: ConnectChecker) {
     }
 
     fun setAuthorization(user: String?, password: String?) {
-        TODO("unimplemented")
+        // GPX patch: store the bearer token (password, else user). Used as the WHIP Authorization
+        // header when the URL carries no ?token=. Was TODO("unimplemented") which crashed any caller.
+        authToken = password ?: user
     }
 
     /**
@@ -189,21 +195,24 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                     return@launch
                 }
 
-                tlsEnabled = urlParser.scheme.endsWith("s")
+                tlsEnabled = urlParser.scheme != "http"
                 val host = urlParser.host
                 val port = urlParser.port ?: if (tlsEnabled) 443 else 8889
-                val app = urlParser.getAppName()
-                val streamName = urlParser.getStreamName()
-                if (app.isEmpty()) {
+                // GPX patch: standard WHIP — POST to the FULL endpoint path with a separate Bearer token
+                // (Millicast: /api/whip/<stream> + token), instead of pedro's appName-only POST with the
+                // last path segment used as the token. Token from ?token=, else setAuthorization.
+                val path = urlParser.path.removePrefix("/")
+                val token = urlParser.getQuery("token") ?: authToken
+                if (path.isEmpty()) {
                     isStreaming = false
                     onMainThread {
-                        connectChecker.onConnectionFailed("Endpoint malformed, should be: http://ip:port/appname/streamname")
+                        connectChecker.onConnectionFailed("Endpoint malformed, should be: scheme://host[:port]/path e.g. https://host/api/whip/<stream>?token=...")
                     }
                     return@launch
                 }
 
                 val error = runCatching {
-                    commandsManager.setUrl(host, port, app, streamName)
+                    commandsManager.setUrl(host, port, path, token, tlsEnabled)
                     if (!commandsManager.audioDisabled) {
                         whipSender.setAudioInfo(commandsManager.sampleRate, commandsManager.isStereo)
                     }

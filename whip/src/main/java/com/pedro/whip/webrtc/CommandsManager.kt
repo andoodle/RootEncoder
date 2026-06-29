@@ -43,6 +43,9 @@ class CommandsManager {
         private set
     var streamName: String? = null
         private set
+    // GPX patch: whether the WHIP signaling POST uses TLS (https), derived from the URL scheme.
+    var tlsEnabled = false
+        private set
     var sps: ByteBuffer? = null
         private set
     var pps: ByteBuffer? = null
@@ -108,11 +111,14 @@ class CommandsManager {
         this.sampleRate = sampleRate
     }
 
-    fun setUrl(host: String, port: Int, app: String, streamName: String?) {
+    // GPX patch: standard-WHIP setUrl. `app` now holds the FULL resource path (e.g. api/whip/<stream>);
+    // `streamName` is repurposed to carry the Bearer token; tlsEnabled drives the POST scheme.
+    fun setUrl(host: String, port: Int, app: String, token: String?, tlsEnabled: Boolean) {
         this.host = host
         this.port = port
         this.app = app
-        this.streamName = streamName
+        this.streamName = token
+        this.tlsEnabled = tlsEnabled
     }
 
     fun clear() {
@@ -169,14 +175,18 @@ class CommandsManager {
         )
         this.certificate = certificate
         localSdpInfo = SdpInfo(uFrag, uPass, certificate.fingerprint, listOf())
-        val uri = "http://$host:$port/$app"
+        // GPX patch: build the POST URI from the parsed scheme + full path (was hardcoded http:// + appName
+        // only), send the Bearer token, and use TLS for https. Omit the default port for a clean URL.
+        val scheme = if (tlsEnabled) "https" else "http"
+        val portPart = if ((tlsEnabled && port == 443) || (!tlsEnabled && port == 80)) "" else ":$port"
+        val uri = "$scheme://$host$portPart/$app"
         val path: String? = streamName
         val headers = mutableMapOf<String, String>().apply {
             put("Content-Type", "application/sdp")
             if (path != null) put("Authorization", "Bearer $path")
         }
         val answer = Requests.makeRequest(
-            uri, "POST", headers, body, timeout, false
+            uri, "POST", headers, body, timeout, tlsEnabled
         )
         remoteSdpInfo = SdpParser.parseBodyAnswer(answer.body)
         tieBreak = secureRandom.nextBytes(8)
