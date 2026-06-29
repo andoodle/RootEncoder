@@ -74,10 +74,10 @@ class H264Packet(track: Int): BasePacket(
       val nalType = data.get()
       val nalSize = data.remaining()
       // Small NAL unit => Single NAL unit
-      if (nalSize <= maxPacketSize - RtpConstants.RTP_HEADER_LENGTH - 1 - encryptSize()) {
-        val buffer = getBuffer(nalSize + RtpConstants.RTP_HEADER_LENGTH + 1 + encryptSize())
-        buffer[RtpConstants.RTP_HEADER_LENGTH] = nalType
-        data.get(buffer, RtpConstants.RTP_HEADER_LENGTH + 1, nalSize)
+      if (nalSize <= maxPacketSize - rtpHeaderSize() - 1 - encryptSize()) {
+        val buffer = getBuffer(nalSize + rtpHeaderSize() + 1 + encryptSize())
+        buffer[rtpHeaderSize()] = nalType
+        data.get(buffer, rtpHeaderSize() + 1, nalSize)
         val rtpTs = updateTimeStamp(buffer, ts)
         if (index == nals.size - 1) markPacket(buffer) //mark end frame
         updateSeq(buffer)
@@ -92,22 +92,22 @@ class H264Packet(track: Int): BasePacket(
 
         var sum = 0
         while (sum < nalSize) {
-          val length = if (nalSize - sum > maxPacketSize - RtpConstants.RTP_HEADER_LENGTH - 2 - encryptSize()) {
-            maxPacketSize - RtpConstants.RTP_HEADER_LENGTH - 2 - encryptSize()
+          val length = if (nalSize - sum > maxPacketSize - rtpHeaderSize() - 2 - encryptSize()) {
+            maxPacketSize - rtpHeaderSize() - 2 - encryptSize()
           } else {
             data.remaining()
           }
-          val buffer = getBuffer(length + RtpConstants.RTP_HEADER_LENGTH + 2 + encryptSize())
-          buffer[RtpConstants.RTP_HEADER_LENGTH] = fuIndicator
+          val buffer = getBuffer(length + rtpHeaderSize() + 2 + encryptSize())
+          buffer[rtpHeaderSize()] = fuIndicator
           // Switch start bit
-          buffer[RtpConstants.RTP_HEADER_LENGTH + 1] = if (sum > 0) fuHeader else (fuHeader or 0x80.toByte())
+          buffer[rtpHeaderSize() + 1] = if (sum > 0) fuHeader else (fuHeader or 0x80.toByte())
           val rtpTs = updateTimeStamp(buffer, ts)
-          data.get(buffer, RtpConstants.RTP_HEADER_LENGTH + 2, length)
+          data.get(buffer, rtpHeaderSize() + 2, length)
           sum += length
           // Last packet before next NAL
           if (sum >= nalSize) {
             // End bit on
-            buffer[RtpConstants.RTP_HEADER_LENGTH + 1] = buffer[RtpConstants.RTP_HEADER_LENGTH + 1].plus(0x40).toByte()
+            buffer[rtpHeaderSize() + 1] = buffer[rtpHeaderSize() + 1].plus(0x40).toByte()
             if (index == nals.size - 1) markPacket(buffer) //mark end frame
           }
           updateSeq(buffer)

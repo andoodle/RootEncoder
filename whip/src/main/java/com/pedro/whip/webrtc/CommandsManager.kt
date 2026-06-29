@@ -84,6 +84,12 @@ class CommandsManager {
 
     companion object {
         private const val TAG = "CommandsManager"
+        // GPX patch: RTP header-extension ids, shared between the SDP offer (a=extmap) and the RTP
+        // emission (BasePacket.enableRtpExtensions). The SFU echoes offered ids, so these must match.
+        const val EXT_ID_TRANSPORT_CC = 4
+        const val EXT_ID_MID = 9
+        private const val EXT_URI_TRANSPORT_CC = "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01"
+        private const val EXT_URI_MID = "urn:ietf:params:rtp-hdrext:sdes:mid"
     }
 
     init {
@@ -343,7 +349,20 @@ class CommandsManager {
             // convention). For WebRTC the BUNDLE m-lines must use the discard port 9 or the SFU won't set
             // up a forwardable track. RTSP path is untouched (this replace is whip-only).
             }.replaceFirst("m=video 0 ", "m=video 9 ")
+            // GPX patch (Step 1): advertise the standard WebRTC RTCP feedback the SFU expects. A working
+            // publisher (OBS) offers goog-remb/ccm-fir/nack/nack-pli; our bare offer had none, so Medooze
+            // (Millicast/Dolby) ingested our H264 but never forwarded a usable video track to viewers
+            // (player established audio-only, video stayed black). These are RTCP-only (no RTP header
+            // extension needed). We don't act on inbound feedback — the keyframe ticker already covers PLI.
+            val videoPt = RtpConstants.payloadType + rtpTracks.trackVideo
             videoBody = media +
+                "a=extmap:$EXT_ID_TRANSPORT_CC $EXT_URI_TRANSPORT_CC\r\n" +
+                "a=extmap:$EXT_ID_MID $EXT_URI_MID\r\n" +
+                "a=rtcp-fb:$videoPt goog-remb\r\n" +
+                "a=rtcp-fb:$videoPt transport-cc\r\n" +
+                "a=rtcp-fb:$videoPt ccm fir\r\n" +
+                "a=rtcp-fb:$videoPt nack\r\n" +
+                "a=rtcp-fb:$videoPt nack pli\r\n" +
                 "a=rtcp-mux\r\n" +
                 "a=msid:$streamId gpxvideo\r\n" +
                 "a=ssrc:$videoSsrc cname:$cName\r\n" +
@@ -356,7 +375,11 @@ class CommandsManager {
                 AudioCodec.OPUS -> SdpBody.createOpusBody(rtpTracks.trackAudio, true)
                 else  -> throw IllegalArgumentException("Unsupported codec: ${audioCodec.name}")
             }.replaceFirst("m=audio 0 ", "m=audio 9 ")
+            val audioPt = RtpConstants.payloadType + rtpTracks.trackAudio
             audioBody = media +
+                "a=extmap:$EXT_ID_TRANSPORT_CC $EXT_URI_TRANSPORT_CC\r\n" +
+                "a=extmap:$EXT_ID_MID $EXT_URI_MID\r\n" +
+                "a=rtcp-fb:$audioPt transport-cc\r\n" +
                 "a=rtcp-mux\r\n" +
                 "a=msid:$streamId gpxaudio\r\n" +
                 "a=ssrc:$audioSsrc cname:$cName\r\n" +
@@ -373,6 +396,7 @@ class CommandsManager {
                 "s=-\r\n" +
                 "t=0 0\r\n" +
                 "a=group:BUNDLE $bundleMids\r\n" +
+                "a=extmap-allow-mixed\r\n" +
                 "a=msid-semantic: WMS $streamId\r\n" +
                 // GPX patch: offer setup:actpass (standard). The client now implements BOTH DTLS roles and
                 // picks from the answer's a=setup (DtlsClient when the SFU answers passive, DtlsConnection

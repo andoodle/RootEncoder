@@ -40,14 +40,14 @@ class OpusPacket(track: Int): BasePacket(0, RtpConstants.payloadType + track) {
     callback: suspend (List<RtpFrame>) -> Unit
   ) {
     val length = mediaFrame.info.size - mediaFrame.data.position()
-    val maxPayload = maxPacketSize - RtpConstants.RTP_HEADER_LENGTH - encryptSize()
+    val maxPayload = maxPacketSize - rtpHeaderSize() - encryptSize()
     val ts = mediaFrame.info.timestamp * 1000
     var sum = 0
     val frames = mutableListOf<RtpFrame>()
     while (sum < length) {
       val size = if (length - sum < maxPayload) length - sum else maxPayload
-      val buffer = getBuffer(size + RtpConstants.RTP_HEADER_LENGTH + encryptSize())
-      mediaFrame.data.get(buffer, RtpConstants.RTP_HEADER_LENGTH, size)
+      val buffer = getBuffer(size + rtpHeaderSize() + encryptSize())
+      mediaFrame.data.get(buffer, rtpHeaderSize(), size)
       val rtpTs = updateTimeStamp(buffer, ts)
       sum += size
       if (sum >= length) markPacket(buffer)
