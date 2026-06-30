@@ -39,39 +39,13 @@ abstract class BasePacket(private var clock: Long, private val payloadType: Int)
   private var roc = 0
   protected val TAG = "BasePacket"
 
-  // GPX patch: optional RTP one-byte header extensions (RFC 5285), used ONLY by the WebRTC/WHIP path.
-  // Disabled by default, so RTSP/RTMP packets are byte-identical (rtpHeaderSize() == RTP_HEADER_LENGTH).
-  // When enabled, every packet carries transport-wide-cc (+ MID) — Medooze (Millicast/Dolby) withholds
-  // video forwarding from a publisher that never sends transport-cc, even though ingest looks healthy.
-  // transportSeq is a single counter SHARED across all tracks on the transport (audio + video).
-  private var extTransportCcId = 0            // 1..14 enables; 0 = off
-  private var extMidId = 0                     // 1..14 enables; 0 = off
-  private var extMid = ""
-  private var extTransportSeq: java.util.concurrent.atomic.AtomicInteger? = null
-  private var extBytes = 0                     // total extension-block size in bytes (0 when off)
-
-  fun enableRtpExtensions(
-    transportCcId: Int,
-    midId: Int,
-    mid: String,
-    transportSeq: java.util.concurrent.atomic.AtomicInteger
-  ) {
-    extTransportCcId = transportCcId
-    extMidId = midId
-    extMid = mid
-    extTransportSeq = transportSeq
-    var dataLen = 0
-    if (transportCcId in 1..14) dataLen += 1 + 2                 // 1-byte hdr + 16-bit seq
-    if (midId in 1..14 && mid.isNotEmpty()) dataLen += 1 + mid.length
-    extBytes = if (dataLen == 0) 0 else 4 + ((dataLen + 3) / 4) * 4 // 0xBEDE + len(2) + padded data
-    // GPX patch: WebRTC publishers cap RTP packets ~1200 B so an SFU has room to add RTX + its own
-    // header extensions when forwarding without exceeding path MTU. Our 1472 left no headroom, so the
-    // Medooze->viewer leg fragmented + dropped every keyframe packet (NACK storm, 0 frames assembled).
-    maxPacketSize = 1200
+  // GPX patch: WebRTC/WHIP caps RTP packets ~1200 B so the SFU (Millicast/Medooze) has room to add RTX +
+  // its own header extensions when forwarding to viewers without exceeding path MTU. At 1472 the
+  // Medooze->viewer leg fragmented + dropped every keyframe packet (black video, NACK storm). RTSP keeps
+  // the default MTU-28 (never calls this).
+  fun overrideMaxPacketSize(size: Int) {
+    maxPacketSize = size
   }
-
-  // Offset where the RTP payload begins: fixed 12-byte header plus any header-extension block.
-  protected fun rtpHeaderSize() = RtpConstants.RTP_HEADER_LENGTH + extBytes
 
   fun setCryptoProperties(cryptoProperties: CryptoProperties) {
     cryptoUtils = CryptoUtils(cryptoProperties)
@@ -101,35 +75,7 @@ abstract class BasePacket(private var clock: Long, private val payloadType: Int)
     buffer[1] = payloadType.toByte()
     setLongSSRC(buffer, ssrc)
     requestBuffer(buffer)
-    if (extBytes > 0) writeExtensions(buffer)
     return buffer
-  }
-
-  // GPX patch: write the RFC 5285 one-byte header-extension block at offset 12 and set the RTP X bit.
-  // transport-wide-cc carries the next shared 16-bit sequence number; MID carries the m-line id. The
-  // SDP offer declares these with matching extmap ids (transport-cc=4, mid=9), so the SFU maps them.
-  private fun writeExtensions(buffer: ByteArray) {
-    buffer[0] = (buffer[0].toInt() or 0x10).toByte() // X = 1
-    val start = RtpConstants.RTP_HEADER_LENGTH
-    buffer[start] = 0xBE.toByte()
-    buffer[start + 1] = 0xDE.toByte()
-    val words = (extBytes - 4) / 4
-    buffer[start + 2] = ((words shr 8) and 0xFF).toByte()
-    buffer[start + 3] = (words and 0xFF).toByte()
-    var p = start + 4
-    if (extTransportCcId in 1..14) {
-      val s = (extTransportSeq?.getAndIncrement() ?: 0) and 0xFFFF
-      buffer[p] = ((extTransportCcId shl 4) or 0x01).toByte() // len-1 = 1 (2 data bytes)
-      buffer[p + 1] = ((s shr 8) and 0xFF).toByte()
-      buffer[p + 2] = (s and 0xFF).toByte()
-      p += 3
-    }
-    if (extMidId in 1..14 && extMid.isNotEmpty()) {
-      buffer[p] = ((extMidId shl 4) or ((extMid.length - 1) and 0x0F)).toByte()
-      for (i in extMid.indices) buffer[p + 1 + i] = extMid[i].code.toByte()
-      p += 1 + extMid.length
-    }
-    // remaining bytes up to extBytes stay 0 (RFC 5285 padding)
   }
 
   protected fun updateTimeStamp(buffer: ByteArray, timestamp: Long): Long {
@@ -152,11 +98,9 @@ abstract class BasePacket(private var clock: Long, private val payloadType: Int)
 
   protected fun encryptPacket(buffer: ByteArray) {
     cryptoUtils?.let {
-      // SRTP encrypts only the RTP payload (after the header AND any header extensions); the auth tag
-      // covers the whole packet. rtpHeaderSize() == RTP_HEADER_LENGTH unless WHIP extensions are on.
       val payloadEndOffset = buffer.size - encryptSize()
-      val payload = buffer.copyOfRange(rtpHeaderSize(), payloadEndOffset)
-      it.encrypt(payload, getIvData(it)).copyInto(buffer, rtpHeaderSize())
+      val payload = buffer.copyOfRange(RtpConstants.RTP_HEADER_LENGTH, payloadEndOffset)
+      it.encrypt(payload, getIvData(it)).copyInto(buffer, RtpConstants.RTP_HEADER_LENGTH)
       val hmac = it.calculateHmac(buffer.copyOfRange(0, payloadEndOffset), roc)
       hmac.copyInto(buffer, payloadEndOffset)
     }

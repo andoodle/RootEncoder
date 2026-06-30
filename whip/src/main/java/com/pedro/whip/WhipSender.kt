@@ -78,15 +78,11 @@ class WhipSender(
         baseSenderReport?.setSSRC(ssrcVideo, ssrcAudio)
         videoPacket.setSSRC(ssrcVideo)
         audioPacket.setSSRC(ssrcAudio)
-        // GPX patch: enable WebRTC RTP header extensions (transport-wide-cc + MID) on both tracks. The
-        // transport-wide sequence number is a SINGLE counter shared across audio + video, so it is created
-        // once here and passed to both packets. Medooze (Millicast/Dolby) withholds video forwarding from a
-        // publisher that never sends transport-cc; ids match the SDP a=extmap offer.
-        val transportSeq = java.util.concurrent.atomic.AtomicInteger(0)
-        val midVideo = commandsManager.rtpTracks.trackVideo.toString()
-        val midAudio = commandsManager.rtpTracks.trackAudio.toString()
-        videoPacket.enableRtpExtensions(CommandsManager.EXT_ID_TRANSPORT_CC, CommandsManager.EXT_ID_MID, midVideo, transportSeq)
-        audioPacket.enableRtpExtensions(CommandsManager.EXT_ID_TRANSPORT_CC, CommandsManager.EXT_ID_MID, midAudio, transportSeq)
+        // GPX patch: cap WHIP packets at 1200 B for SFU forwarding headroom. Millicast/Medooze adds RTX +
+        // its own header extensions when relaying to viewers; at the default 1472 the relayed packets
+        // exceed path MTU and fragment/drop on the viewer leg (black video). This is the load-bearing fix.
+        videoPacket.overrideMaxPacketSize(1200)
+        audioPacket.overrideMaxPacketSize(1200)
         val isTcp = rtpSocket is RtpSocketTcp
         while (scope.isActive && running) {
             val error = runCatching {

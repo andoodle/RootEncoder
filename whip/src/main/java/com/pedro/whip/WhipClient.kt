@@ -40,14 +40,14 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withTimeoutOrNull
 import java.net.URISyntaxException
 import java.nio.ByteBuffer
+import javax.net.ssl.TrustManager
 import kotlin.time.Duration.Companion.milliseconds
 
 class WhipClient(private val connectChecker: ConnectChecker) {
 
     private val TAG = "WhipClient"
 
-    // GPX patch: accept https/whip (standard WHIP is https), not just plaintext http.
-    private val validSchemes = arrayOf("http", "https", "whip")
+    private val validSchemes = arrayOf("http", "https")
 
     private var scope = CoroutineScope(Dispatchers.IO)
     private var scopeRetry = CoroutineScope(Dispatchers.IO)
@@ -79,9 +79,6 @@ class WhipClient(private val connectChecker: ConnectChecker) {
     private var numRetry = 0
     private var reTries = 0
     private var checkServerAlive = false
-    // GPX patch: bearer token for standard-WHIP auth (e.g. Millicast publishing token). Set via
-    // setAuthorization, or read from the URL ?token= / userinfo at connect.
-    private var authToken: String? = null
     var socketType = SocketType.KTOR
 
     val droppedAudioFrames: Long
@@ -103,10 +100,12 @@ class WhipClient(private val connectChecker: ConnectChecker) {
         whipSender.setDelay(millis)
     }
 
-    fun setAuthorization(user: String?, password: String?) {
-        // GPX patch: store the bearer token (password, else user). Used as the WHIP Authorization
-        // header when the URL carries no ?token=. Was TODO("unimplemented") which crashed any caller.
-        authToken = password ?: user
+    fun addCertificates(certificates: TrustManager?) {
+        commandsManager.addCertificates(certificates)
+    }
+
+    fun setAuthorization(token: String?) {
+        commandsManager.setAuth(token)
     }
 
     /**
@@ -189,7 +188,7 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                 if (url == null) {
                     isStreaming = false
                     onMainThread {
-                        connectChecker.onConnectionFailed("Endpoint malformed, should be: http://ip:port/appname/streamname")
+                        connectChecker.onConnectionFailed("Endpoint malformed, should be: http://ip:port/path")
                     }
                     return@launch
                 }
@@ -201,29 +200,25 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                 } catch (_: URISyntaxException) {
                     isStreaming = false
                     onMainThread {
-                        connectChecker.onConnectionFailed("Endpoint malformed, should be: http://ip:port/appname/streamname")
+                        connectChecker.onConnectionFailed("Endpoint malformed, should be: http://ip:port/path")
                     }
                     return@launch
                 }
 
-                tlsEnabled = urlParser.scheme != "http"
+                tlsEnabled = urlParser.scheme.endsWith("s")
                 val host = urlParser.host
                 val port = urlParser.port ?: if (tlsEnabled) 443 else 8889
-                // GPX patch: standard WHIP — POST to the FULL endpoint path with a separate Bearer token
-                // (Millicast: /api/whip/<stream> + token), instead of pedro's appName-only POST with the
-                // last path segment used as the token. Token from ?auth= (Millicast combined URL) or setAuthorization.
-                val path = urlParser.path.removePrefix("/")
-                val token = urlParser.getQuery("auth") ?: authToken
+                val path = urlParser.getFullPath().removePrefix("/")
                 if (path.isEmpty()) {
                     isStreaming = false
                     onMainThread {
-                        connectChecker.onConnectionFailed("Endpoint malformed, should be: scheme://host[:port]/path e.g. https://host/api/whip/<stream>?token=...")
+                        connectChecker.onConnectionFailed("Endpoint malformed, should be: http://ip:port/path")
                     }
                     return@launch
                 }
 
                 val error = runCatching {
-                    commandsManager.setUrl(host, port, path, token, tlsEnabled)
+                    commandsManager.setUrl(host, port, path, tlsEnabled)
                     if (!commandsManager.audioDisabled) {
                         whipSender.setAudioInfo(commandsManager.sampleRate, commandsManager.isStereo)
                     }
@@ -281,6 +276,8 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                     // single request the loop spun on the SFU's own checks, never nominated, never reached
                     // DTLS -> connection up but zero media. Retransmit on a short timeout, bounded, then fail.
                     val iceRtoMs = 500L
+                    // GPX patch: retransmit the binding-check (Millicast is ice-lite and acks our single
+                    // request unreliably). Without this the loop blocks before nomination -> no DTLS.
                     val iceMaxAttempts = 14 // ~7s worst case
                     var candidateResponses = 0
                     var requestSuccessReceived = false
@@ -360,6 +357,9 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                     // the original server-accept path (DtlsConnection). The SRTP write key index differs by
                     // role: client writes with the client key [0], server with the server key [1].
                     val remoteSetup = commandsManager.remoteSdpInfo?.setupRole
+                    // GPX patch: pick the DTLS role from the answer's a=setup. Millicast answers passive (it
+                    // is the DTLS server), so we are the client and send the ClientHello. Without this both
+                    // sides wait passive -> no SRTP keys -> connection up, zero media.
                     val weAreServer = remoteSetup.equals("active", ignoreCase = true)
                     Log.i(TAG, "DTLS role: ${if (weAreServer) "server(accept)" else "client(connect)"} (remote a=setup:$remoteSetup)")
 
