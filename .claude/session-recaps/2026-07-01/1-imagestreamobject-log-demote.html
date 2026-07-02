@@ -8,7 +8,13 @@
 <script type="text/markdown" id="recap">
 # Session 1 — ImageStreamObject log spam demoted (2026-07-01)
 
+**Last updated:** 2026-07-01 (branch policy correction)
+
 **Repo:** RootEncoder fork (D:/Development/RootEncoder), branch `gpx-overlay-logfix` off fork HEAD `5d3148119`.
+
+## Branch policy (IMPORTANT — established this session)
+
+Fork `master` mirrors upstream pedroSG94 ONLY — never merge GPX work into it. PR #1 was mistakenly merged to master, then reverted (master force-reset to `643875237`). Fork mainline for GPX patches is **`gpx-master`** (created at `668ccc4f0`, carries all 33 fork commits). Branch cleanup: deleted `gpx-srt-ghost-fix` (patch-equivalent), `fix/whip-https` (superseded by 5d3148119 upstream-auth), `pr2119` (contained), `gpx-overlay-logfix` (merged into gpx-master).
 
 ## Outcome
 
@@ -28,7 +34,6 @@ Cheap fix options (for future session / ledger):
 
 ## Open items
 
-- PR this branch to master, merge (this wcp run).
 - Skip-if-unchanged optimization — update gpxnative-ai OPEN_ITEMS ledger row `imagestreamobject-log-spam` with the finding above.
 
 ## AI notes (scratch — optional, written by Claude for future sessions)
