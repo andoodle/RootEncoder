@@ -51,6 +51,8 @@ public abstract class BaseEncoder implements EncoderCallback {
   protected MediaCodec codec;
   protected volatile long presentTimeUs;
   protected volatile boolean running = false;
+  // GPX fork patch: whether codec.start() has run since the last stop — gates the stop-path flush.
+  private volatile boolean codecStarted = false;
   protected boolean isBufferMode = true;
   // When true, timestamp baselines are preserved across stop/start cycles so the output PTS stays
   // monotonic across a restart (e.g. reconnect recovery) instead of rebasing to zero. See
@@ -122,7 +124,10 @@ public abstract class BaseEncoder implements EncoderCallback {
   }
 
   private void initCodec() {
-    if (!type.equals(CodecUtil.G711_MIME)) codec.start();
+    if (!type.equals(CodecUtil.G711_MIME)) {
+      codec.start();
+      codecStarted = true;
+    }
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || type.equals(CodecUtil.G711_MIME)) {
       executorService = Executors.newSingleThreadExecutor();
       executorService.submit(() -> {
@@ -192,11 +197,16 @@ public abstract class BaseEncoder implements EncoderCallback {
         handlerThread.getLooper().quit();
       }
       handlerThread.quit();
-      if (codec != null) {
+      // GPX fork patch: only flush a codec that actually reached Executing. Flushing a merely
+      // Configured codec (prepared but never started — every cold-start re-prepare) is a no-op that
+      // still makes MediaCodec log a hard "flush() is valid only at Executing states" error natively
+      // before throwing the IllegalStateException swallowed below.
+      if (codec != null && codecStarted) {
         try {
           codec.flush();
         } catch (IllegalStateException ignored) { }
       }
+      codecStarted = false;
       //wait for thread to die for 500ms.
       try {
         handlerThread.getLooper().getThread().join(500);

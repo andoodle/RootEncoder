@@ -200,7 +200,10 @@ public class SurfaceManager {
       eglContext = EGL14.EGL_NO_CONTEXT;
       eglSurface = EGL14.EGL_NO_SURFACE;
     } else if (BuildConfig.DEBUG) {
-      Log.e(TAG, "GL already released");
+      // GPX fork patch: verbose, not error — release() on a never-initialized/already-released
+      // manager is a defensive no-op hit on every headless teardown (cold start prepares the
+      // pipeline before any surface exists) and was the top E-level line in startup logcat.
+      Log.v(TAG, "GL already released");
     }
     isReady.set(false);
   }
