@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<!-- CANONICAL CONTENT FOR AI: the complete recap (+ AI notes) is the raw-markdown
+     block below, kept FIRST on purpose. Read just this block (Read with a line limit)
+     to get the whole recap cheaply. Source of truth; the styled body is a human VIEW. -->
+<script type="text/markdown" id="recap">
+# Session 1 — ImageStreamObject log spam demoted (2026-07-01)
+
+**Repo:** RootEncoder fork (D:/Development/RootEncoder), branch `gpx-overlay-logfix` off fork HEAD `5d3148119`.
+
+## Outcome
+
+Demoted `Log.i(TAG, "finish load image")` → `Log.v` in `encoder/src/main/java/com/pedro/encoder/utils/gl/ImageStreamObject.java:49` (method `load()`). This was the #1 cold-start log offender in the GPX app: OverlayRenderer ticker calls `ImageObjectFilterRender.setImage` ~15×/s while overlays render → 1250 lines/38 s measured 2026-07-01. Ledger row `imagestreamobject-log-spam` in gpxnative-ai `docs/exec-summaries/OPEN_ITEMS.md`.
+
+- Commit: `2369a9b72` "GPX fork patch: demote ImageStreamObject 'finish load image' log to verbose"
+- Build verified: `:encoder:assembleRelease` passes with `JAVA_HOME="C:/Program Files/Android/Android Studio2/jbr"` (only pre-existing deprecation notes).
+- NO release tag — tags are milestone-only; change rides next fork milestone tag. App consumes fork via composite build when `rootencoder.local=true` in app's gradle.properties.
+
+## Finding (noted, NOT implemented): setImage re-uploads unchanged bitmaps
+
+`ImageObjectFilterRender.setImage` (`encoder/src/main/java/com/pedro/encoder/input/gl/render/filters/object/ImageObjectFilterRender.java:47`) sets `shouldLoad = true` unconditionally. Next `drawFilter` in `BaseObjectFilterRender.java:107` does `releaseTexture()` (glDeleteTextures) + `textureLoader.load(streamObject.getBitmaps())` — full GL texture delete + re-upload on EVERY setImage call, even when bitmap is identical. At 15×/s that's 15 texture uploads/s of potentially unchanged pixels.
+
+Cheap fix options (for future session / ledger):
+- Fork-side: early-return in `setImage` when `bitmap == currentBitmap` (reference equality is free and safe — `load()` only stores the reference).
+- Caller-side (no fork change): OverlayRenderer dedupes — only call setImage when its composed bitmap actually changed.
+
+## Open items
+
+- PR this branch to master, merge (this wcp run).
+- Skip-if-unchanged optimization — update gpxnative-ai OPEN_ITEMS ledger row `imagestreamobject-log-spam` with the finding above.
+
+## AI notes (scratch — optional, written by Claude for future sessions)
+- This repo had no `.claude/` dir before this session — recap index starts at 1 here.
+- Fork commit convention: subject prefixed `GPX fork patch: `.
+- Build command that works on this machine: `$env:JAVA_HOME = "C:/Program Files/Android/Android Studio2/jbr"; .\gradlew :encoder:assembleRelease`.
+</script>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Session 1 — ImageStreamObject Log Demote</title>
+<style>
+  :root{--red-500:#EF3340;--red-700:#B3242B;--red-50:#FDECEC;--paper:#FAF8F5;--card:#FFFFFF;
+    --border:#DDD7CF;--border-subtle:#ECE7E0;--fg-1:#181512;--fg-2:#3D3833;--fg-3:#6B645C;
+    --ok:#12B76A;--attn:#F79009;--chip:#F1ECE5;
+    --font-display:"Barlow Condensed","Oswald","Segoe UI Semibold",system-ui,sans-serif;
+    --font-mono:"Roboto Mono",ui-monospace,"Cascadia Code",Consolas,Menlo,monospace;
+    --radius-md:4px;--radius-lg:8px;--shadow:0 1px 2px rgba(11,9,8,.06),0 4px 8px -2px rgba(11,9,8,.06);--maxw:880px;}
+  *{box-sizing:border-box;}html,body{margin:0;padding:0;}
+  body{background:var(--paper);color:var(--fg-2);font-family:var(--font-mono);font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 28px 72px;}
+  .topbar{max-width:var(--maxw);margin:0 auto;padding:26px 28px 0;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;}
+  .logo{display:inline-flex;align-items:center;gap:9px;}
+  .logo .flag{background:var(--red-500);color:#fff;font-family:var(--font-display);font-weight:800;font-size:17px;padding:3px 7px 2px;border-radius:2px;line-height:1;}
+  .logo .word{font-family:var(--font-display);font-weight:700;font-size:17px;letter-spacing:.14em;text-transform:uppercase;color:var(--fg-1);}
+  .doc-meta{font-size:11px;letter-spacing:.13em;text-transform:uppercase;color:var(--fg-3);text-align:right;}
+  .doc-meta .tag{color:var(--red-700);font-weight:700;}
+  .topdivide{max-width:var(--maxw);margin:16px auto 0;padding:0 28px;}.topdivide hr{border:0;border-top:2px solid var(--red-500);margin:0;}
+  .hero{padding:38px 0 4px;}
+  .eyebrow{font-size:11px;font-weight:700;letter-spacing:.26em;text-transform:uppercase;color:var(--red-700);margin:0 0 12px;}
+  h1{font-family:var(--font-display);font-weight:800;font-size:46px;line-height:1.03;text-transform:uppercase;color:var(--fg-1);margin:0 0 14px;}
+  .standfirst{font-size:16px;color:var(--fg-2);max-width:64ch;margin:0;}
+  .stats{display:flex;flex-wrap:wrap;gap:10px;margin-top:22px;}
+  .stat{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-md);padding:9px 15px;box-shadow:var(--shadow);}
+  .stat b{font-family:var(--font-display);font-weight:700;font-size:22px;color:var(--fg-1);display:block;line-height:1;margin-bottom:3px;}
+  .stat span{font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:var(--fg-3);}
+  details{padding-top:34px;border:0;}details+details{border-top:1px solid var(--border-subtle);}
+  summary{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;cursor:pointer;list-style:none;padding-top:6px;}
+  summary::-webkit-details-marker{display:none;}summary .htext{flex:1;}
+  summary .chev{font-family:var(--font-mono);font-weight:700;font-size:20px;line-height:1;color:var(--red-500);margin-top:16px;transition:transform .18s ease;user-select:none;}
+  details[open] summary .chev{transform:rotate(90deg);}summary:hover h2{color:var(--red-700);}
+  .count{font-family:var(--font-mono);font-size:12px;font-weight:700;color:var(--red-700);background:var(--red-50);border-radius:20px;padding:2px 9px;margin-left:10px;vertical-align:middle;}
+  .secbody{padding-top:14px;}
+  .sec-eyebrow{font-size:11px;font-weight:700;letter-spacing:.22em;text-transform:uppercase;color:var(--red-700);margin:0 0 8px;display:flex;align-items:center;gap:10px;}
+  .sec-eyebrow::before{content:"";width:18px;height:2px;background:var(--red-500);display:inline-block;}
+  h2{font-family:var(--font-display);font-weight:700;font-size:27px;line-height:1.1;text-transform:uppercase;color:var(--fg-1);margin:0;transition:color .12s;}
+  h3{font-family:var(--font-mono);font-weight:700;font-size:13.5px;color:var(--fg-1);margin:0 0 6px;}
+  p{margin:0 0 12px;}p:last-child{margin-bottom:0;}strong{color:var(--fg-1);font-weight:700;}
+  code{font-family:var(--font-mono);background:var(--chip);padding:.1em .4em;border-radius:3px;font-size:.86em;color:var(--fg-1);}
+  .cards{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:18px 20px;box-shadow:var(--shadow);}
+  .card .tag{display:inline-flex;align-items:center;gap:8px;font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px;}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block;}.dot.ok{background:var(--ok);}.dot.attn{background:var(--attn);}
+  .card p{font-size:13.5px;margin:0;}
+  ul.clean{list-style:none;margin:0;padding:0;display:grid;gap:8px;}
+  ul.clean li{position:relative;padding-left:24px;font-size:13.5px;color:var(--fg-2);}
+  ul.clean li::before{content:"";position:absolute;left:3px;top:8px;width:7px;height:7px;background:var(--red-500);border-radius:1px;transform:rotate(45deg);}
+  ul.clean li strong{color:var(--fg-1);}
+  .nugget{background:var(--card);border:1px solid var(--border);border-left:3px solid var(--red-500);border-radius:var(--radius-md);padding:13px 16px;box-shadow:var(--shadow);}
+  .nugget h3{margin-bottom:5px;}.nugget p{font-size:12.5px;color:var(--fg-2);margin:0 0 8px;}
+  pre{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:13px 16px;overflow-x:auto;font-size:12px;line-height:1.5;color:var(--fg-2);box-shadow:var(--shadow);margin:0 0 6px;}
+  pre code{background:none;padding:0;color:var(--fg-2);}
+  .raw pre{max-height:520px;overflow:auto;font-size:11.5px;white-space:pre-wrap;word-break:break-word;}
+  .raw .hint{font-size:11px;color:var(--fg-3);margin:0 0 8px;}
+  footer{max-width:var(--maxw);margin:48px auto 0;padding:20px 28px 36px;border-top:1px solid var(--border);display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--fg-3);}
+  .controls{max-width:var(--maxw);margin:18px auto 0;padding:0 28px;text-align:right;}
+  .controls button{font-family:var(--font-mono);font-size:10.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--fg-3);background:none;border:1px solid var(--border);border-radius:20px;padding:5px 12px;cursor:pointer;}
+  .controls button:hover{color:var(--red-700);border-color:var(--red-500);}
+  @media (max-width:640px){h1{font-size:34px;}h2{font-size:23px;}.cards{grid-template-columns:1fr;}}
+  @media print{:root{--paper:#fff;}body{background:#fff;font-size:11pt;}.card,.nugget,.stat,pre{box-shadow:none;}
+    .controls,summary .chev{display:none;}details>.secbody{display:block!important;}
+    details,.card,.nugget{page-break-inside:avoid;}*{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <span class="logo"><span class="flag">GPX</span><span class="word">Stream</span></span>
+    <span class="doc-meta"><span class="tag">Session Recap · Internal</span><br />RootEncoder fork · 2026-07-01</span>
+  </div>
+  <div class="topdivide"><hr /></div>
+  <div class="wrap">
+    <div class="hero">
+      <p class="eyebrow">Session 1</p>
+      <h1>ImageStreamObject Log Demote</h1>
+      <p class="standfirst">Killed the #1 cold-start log offender: "finish load image" fired ~15×/s from the overlay ticker (1250 lines/38&nbsp;s). Now verbose. One line, built, committed.</p>
+      <div class="stats">
+        <div class="stat"><b>1</b><span>Line changed</span></div>
+        <div class="stat"><b>1250</b><span>Log lines / 38s killed</span></div>
+        <div class="stat"><b>2369a9b</b><span>Commit</span></div>
+      </div>
+    </div>
+    <div class="controls">
+      <button type="button" onclick="document.querySelectorAll('details').forEach(d=>d.open=true)">Expand all</button>
+      <button type="button" onclick="document.querySelectorAll('details').forEach(d=>d.open=false)">Collapse all</button>
+    </div>
+
+    <details open>
+      <summary><span class="htext"><span class="sec-eyebrow">Status</span><h2>Outcome &amp; Open Items</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <div class="cards">
+          <div class="card">
+            <span class="tag"><span class="dot ok"></span>Done</span>
+            <p><code>Log.i</code> → <code>Log.v</code> in <code>ImageStreamObject.load()</code>. <code>:encoder:assembleRelease</code> passes. Committed <code>2369a9b72</code> on <code>gpx-overlay-logfix</code>. No tag — rides next milestone.</p>
+          </div>
+          <div class="card">
+            <span class="tag"><span class="dot attn"></span>Open</span>
+            <p>Update gpxnative-ai <code>OPEN_ITEMS.md</code> ledger row <code>imagestreamobject-log-spam</code> with the texture re-upload finding (below). Optimization itself not implemented — noted only.</p>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details open>
+      <summary><span class="htext"><span class="sec-eyebrow">Finding</span><h2>setImage Re-Uploads Unchanged Bitmaps</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <div class="nugget">
+          <h3>15 GL texture delete + re-uploads per second, even when pixels identical</h3>
+          <p><code>ImageObjectFilterRender.setImage</code> sets <code>shouldLoad = true</code> unconditionally; next <code>drawFilter</code> (BaseObjectFilterRender:107) deletes the texture and re-uploads via <code>textureLoader.load()</code>.</p>
+          <p><strong>Cheap fix:</strong> reference-equality early-return in <code>setImage</code> (fork-side), or dedupe in OverlayRenderer before calling (caller-side, no fork change).</p>
+        </div>
+      </div>
+    </details>
+
+    <details>
+      <summary><span class="htext"><span class="sec-eyebrow">Reference</span><h2>Build &amp; Conventions<span class="count">3</span></h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <ul class="clean">
+          <li><strong>Build:</strong> <code>$env:JAVA_HOME = "C:/Program Files/Android/Android Studio2/jbr"; .\gradlew :encoder:assembleRelease</code></li>
+          <li><strong>Commits:</strong> subject prefix <code>GPX fork patch:</code></li>
+          <li><strong>Consumption:</strong> app uses fork via composite build when <code>rootencoder.local=true</code> in app gradle.properties; tags are milestone-only</li>
+        </ul>
+      </div>
+    </details>
+
+    <details class="raw">
+      <summary><span class="htext"><span class="sec-eyebrow">For the record</span><h2>Full Record + AI Notes</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <p class="hint">Complete raw recap + Claude's scratch notes — the same canonical block the AI reads from the top of this file.</p>
+        <pre id="fullmd"></pre>
+      </div>
+    </details>
+  </div>
+  <footer><span>GPX Stream · Session Recap 1</span><span>Internal — RootEncoder fork</span></footer>
+  <script>document.getElementById('fullmd').textContent=document.getElementById('recap').textContent.trim();</script>
+</body>
+</html>
