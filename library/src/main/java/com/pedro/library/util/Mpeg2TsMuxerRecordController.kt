@@ -55,6 +55,8 @@ class Mpeg2TsMuxerRecordController : AsyncBaseRecordController() {
   private var sampleRate = 0
   private var isStereo = true
   private var sendInfo = false
+  @Volatile
+  private var writeErrorNotified = false
 
   @Throws(IOException::class)
   override fun startRecordImp(
@@ -78,6 +80,7 @@ class Mpeg2TsMuxerRecordController : AsyncBaseRecordController() {
 
   @Throws(IOException::class)
   private fun start(listener: RecordController.Listener?, tracks: RecordTracks) {
+    writeErrorNotified = false
     audioPacket = when (getAudioCodec()) {
       AudioCodec.AAC -> AacPacket(limitSize, psiManager).apply {
         sendAudioInfo(
@@ -150,9 +153,19 @@ class Mpeg2TsMuxerRecordController : AsyncBaseRecordController() {
       outputStream?.let { outputStream ->
         mpegTsPackets.forEach { mpegTsPacket ->
           outputStream.write(mpegTsPacket.buffer)
+          // GPX fork (REC-4): every byte that reaches the file is counted here — this is the single
+          // funnel for PSI + video + audio, so getBytesWritten() IS the exact file size.
+          countBytesWritten(mpegTsPacket.buffer.size)
         }
       }
-    } catch (_: Exception) { }
+    } catch (e: Exception) {
+      // GPX fork (REC-4): a write failure must be VISIBLE (wedged/full disk previously recorded
+      // nothing forever, silently). First failure only — a dead output fails per frame.
+      if (!writeErrorNotified) {
+        writeErrorNotified = true
+        listener?.onError(e)
+      }
+    }
   }
 
   override suspend fun onWriteFrame(frame: MediaFrame) {
