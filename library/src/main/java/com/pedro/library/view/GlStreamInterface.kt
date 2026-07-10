@@ -17,6 +17,7 @@
 package com.pedro.library.view
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Point
 import android.graphics.SurfaceTexture
 import android.graphics.SurfaceTexture.OnFrameAvailableListener
@@ -31,6 +32,7 @@ import com.pedro.common.secureSubmit
 import com.pedro.encoder.input.gl.FilterAction
 import com.pedro.encoder.input.gl.SurfaceManager
 import com.pedro.encoder.input.gl.render.MainRender
+import com.pedro.encoder.input.gl.render.StreamOverlayRender
 import com.pedro.encoder.input.gl.render.filters.BaseFilterRender
 import com.pedro.encoder.input.gl.render.filters.NoFilterRender
 import com.pedro.encoder.input.sources.OrientationConfig
@@ -67,6 +69,9 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
   private val surfaceManagerPreview = SurfaceManager()
   private val multiPreviewSurfaceManagers = ConcurrentHashMap<Surface, PreviewSurfaceInfo>()
   private val mainRender = MainRender()
+  // GPX fork patch: stream-only overlay plane (drawn into the stream encoder surface exclusively —
+  // never the record encoder, preview or photo). See StreamOverlayRender.
+  private val streamOverlayRender = StreamOverlayRender()
 
   private var encoderWidth = 0
   private var encoderHeight = 0
@@ -134,10 +139,36 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
 
   override fun setForceRender(enabled: Boolean, fps: Int) {
     forceRender.setEnabled(enabled, fps)
+    // GPX fork patch: honor the toggle while the render loop is live. Upstream only reads the flag
+    // inside start(), so enabling force-render mid-session (e.g. camera input died and the encoder
+    // must keep producing frames for a slate) silently did nothing until the next GL restart.
+    if (running.get()) {
+      if (enabled && !forceRender.isRunning()) {
+        forceRender.start(forceRenderCallback)
+      } else if (!enabled && forceRender.isRunning()) {
+        forceRender.stop()
+      }
+    }
   }
 
   override fun setForceRender(enabled: Boolean) {
     setForceRender(enabled, 5)
+  }
+
+  // GPX fork patch: shared by start() and the live setForceRender toggle above.
+  private val forceRenderCallback: () -> Unit = {
+    executor?.execute {
+      try {
+        draw(true)
+      } catch (e: RuntimeException) {
+        renderErrorCallback?.onRenderError(e) ?: throw e
+      }
+    }
+    Unit
+  }
+
+  override fun setStreamOverlay(bitmap: Bitmap?) {
+    streamOverlayRender.setBitmap(bitmap)
   }
 
   override fun isRunning(): Boolean = running.get()
@@ -223,15 +254,7 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
       } else {
         mainRender.getSurfaceTexture().setOnFrameAvailableListener(this)
       }
-      forceRender.start {
-        executor?.execute {
-          try {
-            draw(true)
-          } catch (e: RuntimeException) {
-            renderErrorCallback?.onRenderError(e) ?: throw e
-          }
-        }
-      }
+      forceRender.start(forceRenderCallback)
     }
   }
 
@@ -253,6 +276,9 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
     multiPreviewSurfaceManagers.clear()
     surfaceManager.release()
     mainRender.release()
+    // GPX fork patch: the EGL context above is gone — invalidate the overlay's GL handles so the
+    // next draw on a fresh context re-creates them (and re-uploads a still-visible bitmap).
+    streamOverlayRender.release()
   }
 
   private fun draw(forced: Boolean) {
@@ -300,6 +326,9 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
       if (surfaceManagerEncoder.makeCurrent()) {
         mainRender.drawScreenEncoder(w, h, orientation, streamOrientation,
           isStreamVerticalFlip, isStreamHorizontalFlip, streamViewPort)
+        // GPX fork patch: stream-only overlay plane, drawn over the frame content into THIS
+        // surface only — the record encoder branch below never sees it.
+        streamOverlayRender.draw(context)
         surfaceManagerEncoder.setPresentationTime(timestamp)
         surfaceManagerEncoder.swapBuffer()
       }

@@ -206,4 +206,15 @@ public interface GlInterface {
   boolean isRunning();
 
   void setRenderErrorCallback(RenderErrorCallback callback);
+
+  /**
+   * GPX fork addition: composite a full-frame bitmap ONLY into the STREAM encoder output.
+   * Unlike filters (which feed stream, record, preview and photo from one filtered texture),
+   * this plane never reaches the record encoder, the preview or photo captures — so a
+   * stream-facing graphic (e.g. a "no signal" slate) keeps the recording file clean.
+   * Pass null to clear. Only implemented by GlStreamInterface; view-based interfaces no-op.
+   *
+   * @param bitmap overlay image stretched to the full stream frame, or null to remove it.
+   */
+  void setStreamOverlay(@androidx.annotation.Nullable android.graphics.Bitmap bitmap);
 }

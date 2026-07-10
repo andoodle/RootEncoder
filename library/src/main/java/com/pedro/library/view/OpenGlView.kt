@@ -196,6 +196,10 @@ open class OpenGlView : SurfaceView, GlInterface, OnFrameAvailableListener, Surf
         renderErrorCallback = callback
     }
 
+    // GPX fork addition: the stream-only overlay plane is a GlStreamInterface (StreamBase pipeline)
+    // feature. View-based rendering has no separate stream/record branches to split — no-op.
+    override fun setStreamOverlay(bitmap: android.graphics.Bitmap?) = Unit
+
     override fun setEncoderSize(width: Int, height: Int) {
         encoderWidth = width
         encoderHeight = height
