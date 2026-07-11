@@ -72,7 +72,7 @@ class WhipClient(private val connectChecker: ConnectChecker) {
     // send-only WHIP publisher these are the server's RTCP feedback (transport-cc/RR/PLI) — their
     // presence proves the ingest is actually receiving our media, not just holding the ICE session.
     private val mediaPlaneIn = java.util.concurrent.atomic.AtomicLong(0)
-    private val commandsManager: CommandsManager = CommandsManager()
+    private val commandsManager = CommandsManager()
     private val whipSender: WhipSender = WhipSender(connectChecker, commandsManager)
     private var url: String? = null
     private var doingRetry = false
@@ -96,12 +96,12 @@ class WhipClient(private val connectChecker: ConnectChecker) {
         get() = whipSender.getBytesSend()
     var socketTimeout = StreamSocket.DEFAULT_TIMEOUT
 
-    fun setDelay(millis: Long) {
-        whipSender.setDelay(millis)
-    }
-
     fun addCertificates(certificates: TrustManager?) {
         commandsManager.addCertificates(certificates)
+    }
+
+    fun setDelay(millis: Long) {
+        whipSender.setDelay(millis)
     }
 
     fun setAuthorization(token: String?) {
@@ -218,6 +218,7 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                 }
 
                 val error = runCatching {
+                    commandsManager.updateTimestamp()
                     commandsManager.setUrl(host, port, path, tlsEnabled)
                     if (!commandsManager.audioDisabled) {
                         whipSender.setAudioInfo(commandsManager.sampleRate, commandsManager.isStereo)
@@ -239,8 +240,30 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                     val localCandidates = commandsManager.gatheringCandidates(socketType, socketTimeout, GatheringMode.LOCAL)
                     Log.i(TAG, "found ${localCandidates.size} candidates")
                     val offerResponse = commandsManager.writeOffer()
-                    Log.i(TAG, offerResponse.body)
-
+                    Log.i(TAG, offerResponse.toString())
+                    if (offerResponse.statusCode !in 200..299) {
+                        val needAuth = offerResponse.statusCode in 400..499
+                        if (needAuth && commandsManager.token != null) {
+                            val offerResponseAuth = commandsManager.writeOffer(sendAuth = true)
+                            Log.i(TAG, offerResponseAuth.toString())
+                            if (offerResponseAuth.statusCode !in 200..299) {
+                                onMainThread {
+                                    connectChecker.onConnectionFailed("Error configure stream, offer failed: ${offerResponseAuth.statusCode}")
+                                }
+                                return@launch
+                            } else {
+                                onMainThread { connectChecker.onAuthSuccess() }
+                            }
+                        } else if (needAuth) {
+                            onMainThread { connectChecker.onAuthError() }
+                            return@launch
+                        } else {
+                            onMainThread {
+                                connectChecker.onConnectionFailed("Error configure stream, offer failed: ${offerResponse.statusCode}")
+                            }
+                            return@launch
+                        }
+                    }
 
                     val localFrag = commandsManager.localSdpInfo?.uFrag ?: return@launch
                     val remoteFrag = commandsManager.remoteSdpInfo?.uFrag ?: return@launch
@@ -416,9 +439,9 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                     }
                     Log.i(TAG, "dtls connected!!")
                     onMainThread { connectChecker.onConnectionSuccess() }
+                    whipSender.setSocketsInfo(socket)
                     // client writes with client key [0]; server writes with server key [1].
                     whipSender.setCrypto(if (weAreServer) cryptoProperties[1] else cryptoProperties[0])
-                    whipSender.setSocketsInfo(socket)
                     whipSender.start()
                 }.exceptionOrNull()
                 if (error != null) {
@@ -484,7 +507,9 @@ class WhipClient(private val connectChecker: ConnectChecker) {
         runCatching { iceSocket?.close() }
         iceSocket = null
         val error = runCatching {
-            //TODO write delete command
+            withTimeoutOrNull(100.milliseconds) {
+                commandsManager.writeDelete()
+            }
             Log.i(TAG, "write delete success")
         }.exceptionOrNull()
         if (error != null) {
@@ -588,6 +613,5 @@ class WhipClient(private val connectChecker: ConnectChecker) {
     fun resetBytesSend() {
         whipSender.resetBytesSend()
     }
-
 
 }

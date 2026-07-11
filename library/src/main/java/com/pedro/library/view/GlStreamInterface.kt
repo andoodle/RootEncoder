@@ -264,8 +264,15 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
     surfaceHandlerThread?.quitSafely()
     surfaceHandlerThread = null
     threadQueue.clear()
-    executor?.shutdownNow()
-    executor = null
+    val executor = this.executor
+    if (executor != null) {
+      executor.secureSubmit(100) { releaseSurfaceManagers() }
+      executor.shutdownNow()
+      this.executor = null
+    } else releaseSurfaceManagers()
+  }
+
+  private fun releaseSurfaceManagers() {
     sensorRotationManager.stop()
     surfaceManagerPhoto.release()
     surfaceManagerEncoder.release()
@@ -274,6 +281,7 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
       info.surfaceManager.release()
     }
     multiPreviewSurfaceManagers.clear()
+    surfaceManagerPreview.release()
     surfaceManager.release()
     mainRender.release()
     // GPX fork patch: the EGL context above is gone — invalidate the overlay's GL handles so the

@@ -31,6 +31,7 @@ import androidx.annotation.RequiresApi
 import com.pedro.common.frame.MediaFrame
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.io.UnsupportedEncodingException
@@ -53,9 +54,9 @@ import kotlin.coroutines.Continuation
 @Suppress("DEPRECATION")
 fun MediaCodec.BufferInfo.isKeyframe(): Boolean {
   return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-    this.flags == MediaCodec.BUFFER_FLAG_KEY_FRAME
+    this.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
   } else {
-    this.flags == MediaCodec.BUFFER_FLAG_SYNC_FRAME
+    this.flags and MediaCodec.BUFFER_FLAG_SYNC_FRAME != 0
   }
 }
 
@@ -74,6 +75,7 @@ fun ByteBuffer.toByteArray(
 }
 
 fun ByteBuffer.getStartCodeSize(): Int {
+  if (this.remaining() < 4) return 0
   var startCodeSize = 0
   if (this.get(0).toInt() == 0x00 && this.get(1).toInt() == 0x00
     && this.get(2).toInt() == 0x00 && this.get(3).toInt() == 0x01) {
@@ -123,7 +125,7 @@ fun ExecutorService.secureSubmit(timeout: Long = 5000, code: () -> Unit) {
   try {
     if (isTerminated || isShutdown) return
     submit { code() }.get(timeout, TimeUnit.MILLISECONDS)
-  } catch (ignored: InterruptedException) {}
+  } catch (_: Exception) {}
 }
 
 fun String.getMd5Hash(): String {
@@ -131,8 +133,8 @@ fun String.getMd5Hash(): String {
   try {
     md = MessageDigest.getInstance("MD5")
     return md.digest(toByteArray()).bytesToHex()
-  } catch (ignore: NoSuchAlgorithmException) {
-  } catch (ignore: UnsupportedEncodingException) {
+  } catch (_: NoSuchAlgorithmException) {
+  } catch (_: UnsupportedEncodingException) {
   }
   return ""
 }
@@ -200,7 +202,7 @@ fun Int.toUInt32(): ByteArray {
 }
 
 fun Long.toUInt64(): ByteArray {
-  return byteArrayOf((this ushr 56).toByte(), (this ushr 48).toByte(), (this ushr 48).toByte(), (this ushr 32).toByte(), (this ushr 24).toByte(), (this ushr 16).toByte(), (this ushr 8).toByte(), this.toByte())
+  return byteArrayOf((this ushr 56).toByte(), (this ushr 48).toByte(), (this ushr 40).toByte(), (this ushr 32).toByte(), (this ushr 24).toByte(), (this ushr 16).toByte(), (this ushr 8).toByte(), this.toByte())
 }
 
 fun Int.toUInt32LittleEndian(): ByteArray = Integer.reverseBytes(this).toUInt32()
@@ -236,29 +238,34 @@ fun BigInteger.toByteArray(length: Int): ByteArray {
   }
 }
 
+@Throws(IOException::class)
 fun InputStream.readUntil(byteArray: ByteArray) {
   var bytesRead = 0
   while (bytesRead < byteArray.size) {
     val result = read(byteArray, bytesRead, byteArray.size - bytesRead)
-    if (result != -1) bytesRead += result
+    if (result == -1) throw IOException("End of stream")
+    bytesRead += result
   }
 }
 
+@Throws(IOException::class)
 fun InputStream.readUInt32(): Int {
   val data = ByteArray(4)
-  read(data)
+  readUntil(data)
   return data.toUInt32()
 }
 
+@Throws(IOException::class)
 fun InputStream.readUInt24(): Int {
   val data = ByteArray(3)
-  read(data)
+  readUntil(data)
   return data.toUInt24()
 }
 
+@Throws(IOException::class)
 fun InputStream.readUInt16(): Int {
   val data = ByteArray(2)
-  read(data)
+  readUntil(data)
   return data.toUInt16()
 }
 
@@ -310,4 +317,29 @@ fun List<ByteArray>.combine(): ByteArray {
 
 fun SecureRandom.nextBytes(size: Int): ByteArray {
   return ByteArray(size).apply { nextBytes(this) }
+}
+
+fun Boolean.toInt() = if (this) 1 else 0
+
+fun ByteBuffer.indicesOf(prefix: ByteArray): List<Int> {
+  if (prefix.isEmpty()) return emptyList()
+  val indices = mutableListOf<Int>()
+
+  outer@ for (i in 0 until this.limit() - prefix.size + 1) {
+    for (j in prefix.indices) {
+      if (this.get(i + j) != prefix[j]) {
+        continue@outer
+      }
+    }
+    indices.add(i)
+  }
+  return indices
+}
+
+fun ByteBuffer.put(buffer: ByteBuffer, offset: Int, length: Int) {
+  val limit = buffer.limit()
+  buffer.position(offset)
+  buffer.limit(offset + length)
+  this.put(buffer)
+  buffer.limit(limit)
 }

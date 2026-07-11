@@ -137,7 +137,6 @@ class SrtClient(private val connectChecker: ConnectChecker) {
     private set
   var packetsLost = 0
     private set
-  private var latency = 120 //in millis
   var socketType = SocketType.JAVA
   var socketTimeout = StreamSocket.DEFAULT_TIMEOUT
 
@@ -160,7 +159,7 @@ class SrtClient(private val connectChecker: ConnectChecker) {
   }
 
   fun setLatency(latency: Int) {
-    this.latency = latency
+    commandsManager.latency = latency
   }
 
   fun setDelay(millis: Long) {
@@ -244,12 +243,12 @@ class SrtClient(private val connectChecker: ConnectChecker) {
         val host = urlParser.host
         val port = urlParser.port ?: 8888
         val path = urlParser.getQuery("streamid") ?: urlParser.getFullPath()
-        latency = urlParser.getQuery("latency")?.toIntOrNull() ?: latency
+        commandsManager.latency = urlParser.getQuery("latency")?.toIntOrNull() ?: commandsManager.latency
         // Keep the socket read timeout coupled to the negotiated latency on EVERY (re)connect, derived
         // from the authoritative URL latency. The host app also sets this via setSocketTimeout, but that
         // runs once at configure time and goes stale across a latency change + reconnect; deriving it
         // here guarantees it always tracks the current latency. latency is micros, timeout is ms.
-        socketTimeout = (latency / 1000L) + 1000L
+        socketTimeout = (commandsManager.latency / 1000L) + 1000L
         val passphrase = urlParser.getQuery("passphrase") ?: ""
         if (passphrase.isNotEmpty() && passphrase.length in 10..79) {
           val encryptionType = when (urlParser.getQuery("pbkeylen")?.toIntOrNull()) {
@@ -292,8 +291,8 @@ class SrtClient(private val connectChecker: ConnectChecker) {
               flags = ExtensionContentFlag.TSBPDSND.value or ExtensionContentFlag.TSBPDRCV.value or
                   ExtensionContentFlag.CRYPT.value or ExtensionContentFlag.TLPKTDROP.value or
                   ExtensionContentFlag.PERIODICNAK.value or ExtensionContentFlag.REXMITFLG.value,
-              receiverDelay = latency,
-              senderDelay = latency,
+              receiverDelay = commandsManager.latency,
+              senderDelay = commandsManager.latency,
               path = path,
               encryptInfo = commandsManager.getEncryptInfo()
             ))
