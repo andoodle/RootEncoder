@@ -51,17 +51,31 @@ class RtmpSender(
   var socket: RtmpSocket? = null
 
   override fun setVideoInfo(sps: ByteBuffer, pps: ByteBuffer?, vps: ByteBuffer?) {
-    videoPacket = when (commandsManager.videoCodec) {
+    // GPX: this runs on the MediaCodec async callback thread (VideoEncoder.formatChanged ->
+    // sendSPSandPPS -> onVideoInfo), not app code, so an unguarded throw here kills the whole
+    // process with no app-side try/catch able to intervene. An overlapping encoder
+    // reconfigure (e.g. two codec switches racing) can legitimately deliver an
+    // in-flight/incomplete parameter set here. Previously this threw IllegalArgumentException
+    // and crashed the process; now it drops the incomplete set and keeps the prior videoPacket,
+    // trusting a later, complete formatChanged callback (the reconfigure that's still settling,
+    // or the next one) to supply a full set.
+    when (commandsManager.videoCodec) {
       VideoCodec.H265 -> {
-        if (vps == null || pps == null) throw IllegalArgumentException("pps or vps can't be null with h265")
-        H265Packet().apply { sendVideoInfo(sps, pps, vps) }
+        if (vps == null || pps == null) {
+          Log.e(TAG, "setVideoInfo: dropping incomplete h265 parameter set (sps=set pps=${pps != null} vps=${vps != null})")
+          return
+        }
+        videoPacket = H265Packet().apply { sendVideoInfo(sps, pps, vps) }
       }
       VideoCodec.AV1 -> {
-        Av1Packet().apply { sendVideoInfo(sps) }
+        videoPacket = Av1Packet().apply { sendVideoInfo(sps) }
       }
       else -> {
-        if (pps == null) throw IllegalArgumentException("pps can't be null with h264")
-        H264Packet().apply { sendVideoInfo(sps, pps) }
+        if (pps == null) {
+          Log.e(TAG, "setVideoInfo: dropping incomplete h264 parameter set (sps=set pps=false)")
+          return
+        }
+        videoPacket = H264Packet().apply { sendVideoInfo(sps, pps) }
       }
     }
   }
