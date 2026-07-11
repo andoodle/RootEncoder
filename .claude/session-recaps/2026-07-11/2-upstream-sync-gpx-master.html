@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<script type="text/markdown" id="recap">
+# Session 2 — Sync fork with upstream (pedroSG94/RootEncoder)
+
+**Outcome:** `master` fast-forwarded to upstream tip, `gpx-master` merged with upstream and pushed. Both green, full project compiles clean.
+
+## What happened
+
+User asked to check Pedro's (upstream) repo for new commits and consider syncing the fork. The `pedro` remote (https://github.com/pedroSG94/RootEncoder.git) already existed pointing at upstream — confirmed this is the correct term ("fork source" = "upstream").
+
+### master (mirror branch)
+`origin/master` was a clean subset of `pedro/master` — zero divergent commits, just stale by 60 commits (last synced 2026-06-27, upstream tip 2026-07-10). Fast-forward pushed: `643875237..6e41ffc8c`. Notably, the user's own earlier contribution (`fix(whip): support https endpoints with Bearer auth`, PR #2121 from andoodle/fix/whip-https) is now merged into upstream master too.
+
+### gpx-master (fork mainline)
+Branched from pedro commit `7031c5463` (2026-06-29), i.e. already inherited most of the WHIP auth / addCertificates / AV1-packet-revert work from that point. Merged `pedro/master` into `gpx-master` to pull in everything since: BitBuffer refactor + tests, ASC refactor shared RTMP/RTSP, PitchAudioFilter, AndroidViewFilterRender ported to Kotlin + targetFps, RTMP/RTSP/SRT fixes, and — the substantial one — a new WHIP feature: session DELETE-on-disconnect + 401-retry auth flow (send offer without Bearer token first, retry with it only if rejected).
+
+**4 real conflicts, all resolved and verified by full compile:**
+
+1. **`encoder/BaseEncoder.java`** — trivial. Fork's `codecStarted` flag (gates the stop-path flush, added in the 2026-07-01 session) and pedro's independent `running = true` fix were unrelated changes on adjacent lines. Combined both.
+2. **`srt/SrtClient.kt`** — fork had a private `latency` field on SrtClient used only internally (setLatency, socketTimeout derivation, receiverDelay/senderDelay); pedro centralized the same thing into `commandsManager.latency`. Nothing else in the codebase reads `commandsManager.latency`, so adopting pedro's version was risk-free. Kept fork's `getFullPath()` (matches every other protocol client in the codebase — RTSP, WHIP — vs pedro's bare `.path` which drops the query string) and fork's comment explaining why socketTimeout re-derives every reconnect.
+3. **`whip/WhipClient.kt`** — kept fork's DTLS client-role crypto key selection (`weAreServer ? cryptoProperties[1] : cryptoProperties[0]`) — this is the Millicast interop fix from ~12 fork-only WHIP patches (a1a17e9ce, ac2e29458, etc). Took pedro's new `commandsManager.updateTimestamp()` call (pure addition, no fork equivalent). One conflict was a pure merge artifact: pedro moved `addCertificates()` earlier in the file; fork had touched adjacent lines but not moved it, so git surfaced a phantom duplicate — resolved by removing the redundant copy.
+4. **`whip/webrtc/CommandsManager.kt`** — the one real behavioral decision. Asked the user: keep fork's "always send Bearer token when set" (tuned for Millicast across several patches — c125f4d1b, 2d1855a90, b1133889e) or adopt pedro's new 401-retry flow (send without token, retry with it only if the server rejects). **User chose pedro's retry flow.** Also hit a duplicate `private var certificates: TrustManager?` field declaration that the merge auto-resolved into two copies (Kotlin compile error: "Conflicting declarations") — not flagged by git as a conflict since it landed outside any `<<<<<<<` marker; only caught by actually compiling. Same addCertificates/setAuth phantom-duplicate pattern as WhipClient.kt.
+
+### Verification
+No JDK on PATH in the bash environment initially — `Android Studio` (the first hit under Program Files) only ships `jbr` without a `java.exe`; the real JDK was under a second install, `Android Studio2\jbr`. Once JAVA_HOME was pointed there, `:encoder:compileDebugJavaWithJavac :srt:compileDebugKotlin :whip:compileDebugKotlin` caught the duplicate-`certificates` field immediately. After the fix, ran a full `compileDebugKotlin compileDebugJavaWithJavac` across every module — clean.
+
+Merge committed (`cd1d3d5f3`) and pushed to `origin/gpx-master`.
+
+## Open items
+
+- **WHIP auth flow behavior changed** (always-send → 401-retry) and hasn't been tested live against Millicast. Fork's prior "always send immediately" behavior existed because of real, hard-won Millicast compatibility work — the retry flow is upstream's spec-style approach but is unverified against Millicast specifically. This needs a live streaming test, not just a compile check.
+- No other merge fallout expected — full project compiled clean — but worth a normal smoke test pass (record, RTMP, RTSP, SRT, WHIP publish) given the breadth of what got pulled in (BitBuffer/ASC refactors touch shared code across RTMP/RTSP/SRT).
+
+## AI notes (scratch — optional, written by Claude for future sessions)
+
+- `git merge --no-commit --no-ff` dry-run is worth doing before any upstream sync on this fork — it surfaces conflicts without committing, so you can inspect and decide before touching the real branch state.
+- Git's 3-way merge does **not** reliably catch "both sides independently added the same declaration in a different spot" (duplicate `certificates` field, duplicate `addCertificates()` function twice in this session) — these land as silent auto-merges outside any `<<<<<<<` block. A full compile after every merge on this repo is not optional; grep-based verification alone would have missed the certificates duplicate.
+- JAVA_HOME on this machine: `C:\Program Files\Android\Android Studio2\jbr` (note the "2" — there's a decoy `Android Studio` install with an incomplete jbr, no `java.exe`, that will silently fail `java -version` with a `command not found`, not an obviously-wrong-path error).
+</script>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Session 2 — Sync fork with upstream</title>
+<style>
+  :root{--red-500:#EF3340;--red-700:#B3242B;--red-50:#FDECEC;--paper:#FAF8F5;--card:#FFFFFF;
+    --border:#DDD7CF;--border-subtle:#ECE7E0;--fg-1:#181512;--fg-2:#3D3833;--fg-3:#6B645C;
+    --ok:#12B76A;--attn:#F79009;--chip:#F1ECE5;
+    --font-display:"Barlow Condensed","Oswald","Segoe UI Semibold",system-ui,sans-serif;
+    --font-mono:"Roboto Mono",ui-monospace,"Cascadia Code",Consolas,Menlo,monospace;
+    --radius-md:4px;--radius-lg:8px;--shadow:0 1px 2px rgba(11,9,8,.06),0 4px 8px -2px rgba(11,9,8,.06);--maxw:880px;}
+  *{box-sizing:border-box;}html,body{margin:0;padding:0;}
+  body{background:var(--paper);color:var(--fg-2);font-family:var(--font-mono);font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 28px 72px;}
+  .topbar{max-width:var(--maxw);margin:0 auto;padding:26px 28px 0;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;}
+  .logo{display:inline-flex;align-items:center;gap:9px;}
+  .logo .flag{background:var(--red-500);color:#fff;font-family:var(--font-display);font-weight:800;font-size:17px;padding:3px 7px 2px;border-radius:2px;line-height:1;}
+  .logo .word{font-family:var(--font-display);font-weight:700;font-size:17px;letter-spacing:.14em;text-transform:uppercase;color:var(--fg-1);}
+  .doc-meta{font-size:11px;letter-spacing:.13em;text-transform:uppercase;color:var(--fg-3);text-align:right;}
+  .doc-meta .tag{color:var(--red-700);font-weight:700;}
+  .topdivide{max-width:var(--maxw);margin:16px auto 0;padding:0 28px;}.topdivide hr{border:0;border-top:2px solid var(--red-500);margin:0;}
+  .hero{padding:38px 0 4px;}
+  .eyebrow{font-size:11px;font-weight:700;letter-spacing:.26em;text-transform:uppercase;color:var(--red-700);margin:0 0 12px;}
+  h1{font-family:var(--font-display);font-weight:800;font-size:46px;line-height:1.03;text-transform:uppercase;color:var(--fg-1);margin:0 0 14px;}
+  .standfirst{font-size:16px;color:var(--fg-2);max-width:64ch;margin:0;}
+  .stats{display:flex;flex-wrap:wrap;gap:10px;margin-top:22px;}
+  .stat{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-md);padding:9px 15px;box-shadow:var(--shadow);}
+  .stat b{font-family:var(--font-display);font-weight:700;font-size:22px;color:var(--fg-1);display:block;line-height:1;margin-bottom:3px;}
+  .stat span{font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:var(--fg-3);}
+  details{padding-top:34px;border:0;}details+details{border-top:1px solid var(--border-subtle);}
+  summary{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;cursor:pointer;list-style:none;padding-top:6px;}
+  summary::-webkit-details-marker{display:none;}summary .htext{flex:1;}
+  summary .chev{font-family:var(--font-mono);font-weight:700;font-size:20px;line-height:1;color:var(--red-500);margin-top:16px;transition:transform .18s ease;user-select:none;}
+  details[open] summary .chev{transform:rotate(90deg);}summary:hover h2{color:var(--red-700);}
+  .count{font-family:var(--font-mono);font-size:12px;font-weight:700;color:var(--red-700);background:var(--red-50);border-radius:20px;padding:2px 9px;margin-left:10px;vertical-align:middle;}
+  .secbody{padding-top:14px;}
+  .sec-eyebrow{font-size:11px;font-weight:700;letter-spacing:.22em;text-transform:uppercase;color:var(--red-700);margin:0 0 8px;display:flex;align-items:center;gap:10px;}
+  .sec-eyebrow::before{content:"";width:18px;height:2px;background:var(--red-500);display:inline-block;}
+  h2{font-family:var(--font-display);font-weight:700;font-size:27px;line-height:1.1;text-transform:uppercase;color:var(--fg-1);margin:0;transition:color .12s;}
+  h3{font-family:var(--font-mono);font-weight:700;font-size:13.5px;color:var(--fg-1);margin:0 0 6px;}
+  p{margin:0 0 12px;}p:last-child{margin-bottom:0;}strong{color:var(--fg-1);font-weight:700;}
+  code{font-family:var(--font-mono);background:var(--chip);padding:.1em .4em;border-radius:3px;font-size:.86em;color:var(--fg-1);}
+  .cards{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:18px 20px;box-shadow:var(--shadow);}
+  .card .tag{display:inline-flex;align-items:center;gap:8px;font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px;}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block;}.dot.ok{background:var(--ok);}.dot.attn{background:var(--attn);}
+  .card p{font-size:13.5px;margin:0;}
+  .timeline{display:grid;}
+  .commit{display:grid;grid-template-columns:84px 1fr;gap:14px;align-items:baseline;padding:9px 0;border-bottom:1px solid var(--border-subtle);}
+  .commit:last-child{border-bottom:0;}
+  .commit .hash{background:var(--fg-1);color:#fff;font-size:11.5px;padding:3px 0;border-radius:3px;text-align:center;letter-spacing:.02em;}
+  .commit .msg{font-size:13.5px;color:var(--fg-2);}.commit .msg strong{color:var(--fg-1);}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  .nugget{background:var(--card);border:1px solid var(--border);border-left:3px solid var(--red-500);border-radius:var(--radius-md);padding:13px 16px;box-shadow:var(--shadow);}
+  .nugget h3{margin-bottom:5px;}.nugget p{font-size:12.5px;color:var(--fg-2);margin:0;}
+  ul.clean{list-style:none;margin:0;padding:0;display:grid;gap:8px;}
+  ul.clean li{position:relative;padding-left:24px;font-size:13.5px;color:var(--fg-2);}
+  ul.clean li::before{content:"";position:absolute;left:3px;top:8px;width:7px;height:7px;background:var(--red-500);border-radius:1px;transform:rotate(45deg);}
+  ul.clean li strong{color:var(--fg-1);}
+  .check{list-style:none;margin:0;padding:0;display:grid;gap:11px;}
+  .check li{position:relative;padding-left:28px;font-size:13.5px;color:var(--fg-2);}
+  .check li::before{content:"";position:absolute;left:0;top:2px;width:15px;height:15px;border:2px solid var(--attn);border-radius:3px;}
+  .check li strong{color:var(--fg-1);}
+  .snap h3{margin:16px 0 6px;}
+  pre{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:13px 16px;overflow-x:auto;font-size:12px;line-height:1.5;color:var(--fg-2);box-shadow:var(--shadow);margin:0 0 6px;}
+  pre code{background:none;padding:0;color:var(--fg-2);}
+  .resume .secbody{background:var(--fg-1);color:#EDE9E3;border-radius:var(--radius-lg);padding:20px 24px;margin-top:14px;}
+  .resume pre{background:#231e1a;border:1px solid #3a332d;color:#D9D2CA;font-size:12.5px;box-shadow:none;margin:0;}
+  .raw pre{max-height:520px;overflow:auto;font-size:11.5px;white-space:pre-wrap;word-break:break-word;}
+  .raw .hint{font-size:11px;color:var(--fg-3);margin:0 0 8px;}
+  footer{max-width:var(--maxw);margin:48px auto 0;padding:20px 28px 36px;border-top:1px solid var(--border);display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--fg-3);}
+  .controls{max-width:var(--maxw);margin:18px auto 0;padding:0 28px;text-align:right;}
+  .controls button{font-family:var(--font-mono);font-size:10.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--fg-3);background:none;border:1px solid var(--border);border-radius:20px;padding:5px 12px;cursor:pointer;}
+  .controls button:hover{color:var(--red-700);border-color:var(--red-500);}
+  @media (max-width:640px){h1{font-size:34px;}h2{font-size:23px;}.cards,.grid2{grid-template-columns:1fr;}.commit{grid-template-columns:72px 1fr;}}
+  @media print{:root{--paper:#fff;}body{background:#fff;font-size:11pt;}.card,.nugget,.stat,pre{box-shadow:none;}
+    .controls,summary .chev{display:none;}details>.secbody{display:block!important;}
+    details,.card,.nugget,.commit{page-break-inside:avoid;}*{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <span class="logo"><span class="flag">GPX</span><span class="word">Stream</span></span>
+    <span class="doc-meta"><span class="tag">Session Recap · Internal</span><br />RootEncoder · 2026-07-11</span>
+  </div>
+  <div class="topdivide"><hr /></div>
+  <div class="wrap">
+    <div class="hero">
+      <p class="eyebrow">Session 2</p>
+      <h1>Sync fork with upstream</h1>
+      <p class="standfirst">master fast-forwarded to pedroSG94/RootEncoder tip; gpx-master merged with upstream, 4 conflicts resolved, full project compiles clean, pushed.</p>
+      <div class="stats">
+        <div class="stat"><b>60</b><span>upstream commits pulled</span></div>
+        <div class="stat"><b>4</b><span>real conflicts</span></div>
+        <div class="stat"><b>1</b><span>duplicate field caught by build</span></div>
+        <div class="stat"><b>2</b><span>branches pushed</span></div>
+      </div>
+    </div>
+    <div class="controls">
+      <button type="button" onclick="document.querySelectorAll('details').forEach(d=>d.open=true)">Expand all</button>
+      <button type="button" onclick="document.querySelectorAll('details').forEach(d=>d.open=false)">Collapse all</button>
+    </div>
+
+    <details open>
+      <summary><span class="htext"><span class="sec-eyebrow">Status</span><h2>Outcome</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <div class="cards">
+          <div class="card"><span class="tag"><span class="dot ok"></span>master</span><p>Fast-forwarded <code>643875237..6e41ffc8c</code>, pushed. Zero conflicts — was a clean stale mirror, no fork drift.</p></div>
+          <div class="card"><span class="tag"><span class="dot ok"></span>gpx-master</span><p>Merged <code>pedro/master</code>, 4 conflicts resolved, full compile clean, committed <code>cd1d3d5f3</code> and pushed.</p></div>
+        </div>
+      </div>
+    </details>
+
+    <details open>
+      <summary><span class="htext"><span class="sec-eyebrow">Risk</span><h2>Open Items</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <ul class="check">
+          <li><strong>WHIP auth flow behavior changed, unverified against Millicast.</strong> Switched from fork's "always send Bearer token" to pedro's "send without token, retry with it on rejection" — a user decision made without a live test. Fork's prior behavior existed because of real Millicast compatibility trial-and-error across ~5 patches.</li>
+          <li><strong>Broad refactor surface (BitBuffer/ASC shared across RTMP/RTSP/SRT).</strong> Compiles clean but wasn't exercised at runtime — a normal smoke pass (record, RTMP, RTSP, SRT, WHIP publish) is worth doing before calling this fully verified.</li>
+        </ul>
+      </div>
+    </details>
+
+    <details>
+      <summary><span class="htext"><span class="sec-eyebrow">Merge conflicts</span><h2>Resolutions<span class="count">4</span></h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <div class="grid2">
+          <div class="nugget"><h3>BaseEncoder.java</h3><p>Trivial — fork's <code>codecStarted</code> flush guard and pedro's <code>running = true</code> fix were independent changes on adjacent lines. Kept both.</p></div>
+          <div class="nugget"><h3>SrtClient.kt</h3><p>Adopted pedro's centralized <code>commandsManager.latency</code> (nothing else reads it — risk-free). Kept fork's <code>getFullPath()</code>, matching every other protocol client in the codebase.</p></div>
+          <div class="nugget"><h3>WhipClient.kt</h3><p>Kept fork's DTLS client-role crypto key selection (Millicast interop, ~12 fork patches). Took pedro's new <code>updateTimestamp()</code> call. One hunk was a phantom duplicate from pedro moving <code>addCertificates()</code>.</p></div>
+          <div class="nugget"><h3>CommandsManager.kt (whip)</h3><p><strong>User decision:</strong> adopted pedro's 401-retry auth flow over fork's always-send. Also fixed a duplicate <code>certificates</code> field the auto-merge silently produced — only caught by compiling, not by git's conflict markers.</p></div>
+        </div>
+      </div>
+    </details>
+
+    <details>
+      <summary><span class="htext"><span class="sec-eyebrow">What shipped</span><h2>Upstream Highlights<span class="count">60 commits</span></h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <ul class="clean">
+          <li><strong>WHIP:</strong> session DELETE on disconnect, 401-retry auth flow, srtcp encryption fix</li>
+          <li><strong>SRT:</strong> multiple fix rounds, handshake support improvements</li>
+          <li><strong>Refactors:</strong> BitBuffer (+ tests), ASC shared between RTMP/RTSP</li>
+          <li><strong>New:</strong> PitchAudioFilter, AndroidViewFilterRender ported to Kotlin, targetFps</li>
+          <li><strong>User's own PR #2121</strong> (WHIP HTTPS + Bearer auth) landed in upstream master</li>
+        </ul>
+      </div>
+    </details>
+
+    <details class="resume">
+      <summary><span class="htext"><span class="sec-eyebrow">Next session</span><h2>Resume</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <pre>Live-test the WHIP publish path against Millicast on gpx-master (post upstream-sync
+merge, commit cd1d3d5f3). The auth flow changed from "always send Bearer token" to
+"send without token, retry with it on 401" (whip/webrtc/CommandsManager.kt writeOffer).
+If the stream fails to authenticate or black-frames on connect, the fix is reverting
+that one conditional back to unconditional token send — see session recap 2 for the
+exact prior line. Also worth a general smoke pass on RTMP/RTSP/SRT record+publish
+given the BitBuffer/ASC refactor touched shared code across those modules.</pre>
+      </div>
+    </details>
+
+    <details class="raw">
+      <summary><span class="htext"><span class="sec-eyebrow">For the record</span><h2>Full Record + AI Notes</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <p class="hint">Complete raw recap + Claude's scratch notes — the same canonical block the AI reads from the top of this file.</p>
+        <pre id="fullmd"></pre>
+      </div>
+    </details>
+  </div>
+  <footer><span>GPX Stream · Session Recap 2</span><span>Internal — RootEncoder</span></footer>
+  <script>document.getElementById('fullmd').textContent=document.getElementById('recap').textContent.trim();</script>
+</body>
+</html>
