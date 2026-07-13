@@ -65,6 +65,8 @@ open class OpenGlView : SurfaceView, GlInterface, OnFrameAvailableListener, Surf
     private var encoderHeight = 0
     private var encoderRecordWidth = 0
     private var encoderRecordHeight = 0
+    private var photoWidth = 0
+    private var photoHeight = 0
     private var takePhotoCallback: TakePhotoCallback? = null
     private var streamRotation = 0
     private var muteVideo = false
@@ -214,6 +216,8 @@ open class OpenGlView : SurfaceView, GlInterface, OnFrameAvailableListener, Surf
 
     override fun takePhoto(takePhotoCallback: TakePhotoCallback) {
         this.takePhotoCallback = takePhotoCallback
+        this.photoWidth = encoderWidth
+        this.photoHeight = encoderHeight
     }
 
     override fun takePhoto(
@@ -222,6 +226,8 @@ open class OpenGlView : SurfaceView, GlInterface, OnFrameAvailableListener, Surf
         takePhotoCallback: TakePhotoCallback?
     ) {
         this.takePhotoCallback = takePhotoCallback
+        this.photoWidth = width ?: encoderWidth
+        this.photoHeight = height ?: encoderHeight
     }
 
 
@@ -284,8 +290,8 @@ open class OpenGlView : SurfaceView, GlInterface, OnFrameAvailableListener, Surf
         }
         if (takePhotoCallback != null && surfaceManagerPhoto.isReady && mainRender.isReady()) {
             if (surfaceManagerPhoto.makeCurrent()) {
-                mainRender.drawScreen(encoderWidth, encoderHeight, aspectRatioMode, streamRotation, isStreamVerticalFlip, isStreamHorizontalFlip, null)
-                takePhotoCallback?.onTakePhoto(GlUtil.getBitmap(encoderWidth, encoderHeight))
+                mainRender.drawScreen(photoWidth, photoHeight, aspectRatioMode, streamRotation, isStreamVerticalFlip, isStreamHorizontalFlip, null)
+                takePhotoCallback?.onTakePhoto(GlUtil.getBitmap(photoWidth, photoHeight))
                 takePhotoCallback = null
                 surfaceManagerPhoto.swapBuffer()
             }

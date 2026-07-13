@@ -110,6 +110,10 @@ abstract class StreamBase(
    *
    * @param profile codec value from MediaCodecInfo.CodecProfileLevel class
    * @param level codec value from MediaCodecInfo.CodecProfileLevel class
+   * @param forceRecordVbr GPX fork patch: when the record encoder is prepared at its own resolution
+   * (recordWidth/recordHeight set), force it into VBR bitrate mode instead of the device's default
+   * (CBR when supported). Independent of the resolution-difference check itself — callers decide
+   * this explicitly rather than getting it as a side effect of using a different record resolution.
    *
    * @throws IllegalArgumentException if current video parameters are not supported by the VideoSource
    * @throws IllegalArgumentException if you use differentRecordResolution but the aspect ratio is not the same than stream resolution
@@ -120,7 +124,8 @@ abstract class StreamBase(
   fun prepareVideo(
     width: Int, height: Int, bitrate: Int, fps: Int = 30, iFrameInterval: Int = 2,
     rotation: Int = 0, profile: Int = -1, level: Int = -1,
-    recordWidth: Int = 0, recordHeight: Int = 0, recordBitrate: Int = bitrate
+    recordWidth: Int = 0, recordHeight: Int = 0, recordBitrate: Int = bitrate,
+    forceRecordVbr: Boolean = false
   ): Boolean {
     if (isStreaming || isRecording || isOnPreview) {
       throw IllegalStateException("Stream, record and preview must be stopped before prepareVideo")
@@ -146,7 +151,7 @@ abstract class StreamBase(
       glInterface.setCameraOrientation(if (rotation == 0) 270 else rotation - 90)
       glInterface.setOrientationConfig(videoSource.getOrientationConfig())
       if (differentRecordResolution) {
-          videoEncoderRecord.setTryForceVBRBitrateMode(true)
+        videoEncoderRecord.setTryForceVBRBitrateMode(forceRecordVbr)
         val result = videoEncoderRecord.prepareVideoEncoder(recordWidth, recordHeight, fps, recordBitrate, rotation,
           iFrameInterval, FormatVideoEncoder.SURFACE, profile, level)
         if (!result) return false
@@ -163,7 +168,7 @@ abstract class StreamBase(
         width: Int, height: Int, bitrate: Int, fps: Int = 30, iFrameInterval: Int = 2,
         rotation: Int = 0, profile: Int = -1, level: Int = -1,
         recordWidth: Int = 0, recordHeight: Int = 0, recordBitrate: Int = bitrate,
-        recordCodec: VideoCodec = VideoCodec.H264
+        recordCodec: VideoCodec = VideoCodec.H264, forceRecordVbr: Boolean = false
     ): Boolean {
         if (isStreaming || isRecording || isOnPreview) {
             throw IllegalStateException("Stream, record and preview must be stopped before prepareVideo")
@@ -189,7 +194,7 @@ abstract class StreamBase(
             glInterface.setCameraOrientation(if (rotation == 0) 270 else rotation - 90)
             glInterface.setOrientationConfig(videoSource.getOrientationConfig())
             if (differentRecordResolution) {
-//                videoEncoderRecord.setTryForceVBRBitrateMode(true)
+                videoEncoderRecord.setTryForceVBRBitrateMode(forceRecordVbr)
                 val result = videoEncoderRecord.prepareVideoEncoder(recordWidth, recordHeight, fps, recordBitrate, rotation,
                     iFrameInterval, FormatVideoEncoder.SURFACE, profile, level)
                 if (!result) return false
@@ -325,7 +330,6 @@ abstract class StreamBase(
     val usedTracks = tracks ?: if (videoSource is NoVideoSource) RecordController.RecordTracks.AUDIO
         else if (audioSource is NoAudioSource) RecordController.RecordTracks.VIDEO
         else RecordController.RecordTracks.ALL
-//      recordController.setVideoCodec(VideoCodec.H264)
     recordController.setRequestKeyFrame {
       videoEncoder.requestKeyframe()
       videoEncoderRecord.requestKeyframe()
@@ -718,9 +722,7 @@ abstract class StreamBase(
             VideoCodec.H265 -> CodecUtil.H265_MIME
             VideoCodec.AV1 -> CodecUtil.AV1_MIME
         }
-        CodecUtil.showAllCodecsInfo()
 //        videoEncoderRecord.setTryForceVBRBitrateMode(true)
-//        videoEncoderRecord.
         videoEncoderRecord.type = type
     }
 

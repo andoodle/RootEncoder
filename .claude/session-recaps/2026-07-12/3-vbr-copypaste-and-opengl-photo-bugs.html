@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<script type="text/markdown" id="recap">
+# Session 3 — VBR copy-paste bug, OpenGlView photo-size bug, cross-repo VBR fix validation
+
+## Outcome
+
+Fixed three real bugs in the RootEncoder fork (`gpx-master`), all traced back to the same
+origin: commit `2fefe4c0e` ("GPX fork patches re-applied onto pedro 2.7.5"), which ported
+patches from a separate "alexsafe" fork (`f26cd13abb`, pedro 2.6.7 base) onto this fork's
+pedro 2.7.5 base. That port introduced at least three copy-paste/incomplete-port defects;
+this session found and fixed two, confirmed a third was already fixed by a concurrent session,
+and cleaned up leftover debug cruft from the same port.
+
+Build verified clean: `:library:compileDebugKotlin` + `:encoder:compileDebugJavaWithJavac`
+(JAVA_HOME = Android Studio2 jbr). No device QA — none of these changes have app-visible
+behavior change except the OpenGlView fix, which the current app (gpxnative-ai) never
+exercises (see below).
+
+## What was fixed
+
+1. **`CodecUtil.isCBRModeSupported()` copy-paste bug** (`encoder/.../utils/CodecUtil.java:420`)
+   — `isVbrSupported` checked `BITRATE_MODE_CBR` again instead of `BITRATE_MODE_VBR`. Traced
+   every use of the local var: only consumed by the `Log.d` two lines below, never returned,
+   never read by any caller. Zero behavioral impact — logging-accuracy fix only.
+   - Checked whether this exists upstream (`pedro/master`) before considering a PR: it doesn't.
+     Upstream's `isCBRModeSupported` is a plain one-liner with no `isVbrSupported`/`Log.d` block
+     at all — that whole block is fork-only code from the alexsafe port. No PR possible/needed;
+     fixed locally only.
+
+2. **`StreamBase.kt` dead debug code from the same port** — removed:
+   - Unconditional `CodecUtil.showAllCodecsInfo()` call inside `setVideoRecCodec()` (enumerated
+     every device codec, built strings, discarded the result, on every codec switch).
+   - Dangling commented-out lines: `// recordController.setVideoCodec(VideoCodec.H264)` in
+     `startRecord()`, and a stray `// videoEncoderRecord.` fragment in `setVideoRecCodec()`.
+
+3. **`OpenGlView.kt` `takePhoto(width, height, cb)` was a no-op stub** — ignored the requested
+   size entirely; always captured at `encoderWidth`/`encoderHeight` regardless of what was
+   asked for. Compare `GlStreamInterface.kt`'s version (correct): tracks `photoWidth`/
+   `photoHeight` and threads them through `drawScreen`/`getBitmap`. Fixed `OpenGlView` to match
+   the same pattern.
+   - **Impact check (asked for explicitly):** confirmed *zero* impact on gpxnative-ai. The app's
+     `GenericStream` (`PublisherHolder.kt:57`) extends `StreamBase`, whose `glInterface` field is
+     hardcoded to `GlStreamInterface` (`StreamBase.kt:84`) — `OpenGlView` is only reachable via
+     legacy pre-`StreamBase` APIs (`Camera1Base`/`Camera2Base`/`FromFileBase`/`GenericCamera1`/
+     `GenericCamera2`) the app doesn't use.
+   - Also traced the full `GlStreamInterface` read-back path to confirm the app's
+     `PeriodicPhotoCaptureController.kt` actually gets a correctly-sized photo: `surfaceManagerPhoto`'s
+     EGL buffer is allocated at `max(encoderWidth, encoderRecordWidth) x max(encoderHeight,
+     encoderRecordHeight)` (≈1080p, the record resolution) in `GlStreamInterface.start()`. The app
+     requests photos capped to ~540p (`PhotoCapturePolicy.capDimensions`), always ≤ that buffer —
+     safe sub-region readback, no out-of-bounds risk, and the app's existing OOM-crash fix (capping
+     readback size) actually works as designed.
+
+## What was found but NOT touched — already fixed elsewhere
+
+4. **VBR-forcing tied to resolution-difference check, not an independent decision** — this fork's
+   `StreamBase.prepareVideo` had two overloads. One hardcoded
+   `videoEncoderRecord.setTryForceVBRBitrateMode(true)` inside `if (differentRecordResolution)`;
+   the sibling overload had the *same* line present but commented out — a copy-paste-and-forgot
+   from the alexsafe port, meaning VBR forcing for the record encoder worked through one entry
+   point and silently no-op'd through the other.
+   - Investigated the parallel `gpxnative-ai` repo (`D:/Development/gpxnative-ai`) because the user
+     flagged in-progress work there might collide. `gpxnative-ai`'s Gradle composite build points
+     `rootencoder.dir` straight at *this* checkout (`D:/Development/RootEncoder`,
+     `gradle.properties:47`), so an agent working that repo's spec can and does edit this
+     checkout's source directly, uncommitted.
+   - Found `gpxnative-ai/docs/specs/2026-07-12-vbr-record-decoupling-fix.md` (untracked, dated
+     today) describing exactly this bug and a fix: a new `forceRecordVbr: Boolean = false` param
+     added to *both* `prepareVideo` overloads, explicitly set (not just when forcing on) so the
+     encoder's bitrate-mode flag never leaks stale state across reconfigures (the `videoEncoderRecord`
+     field is a single `by lazy` instance reused across calls).
+   - By the time this session re-checked `StreamBase.kt`, that fix was **already present in the
+     working tree, uncommitted** — applied concurrently by whatever session/agent is driving the
+     gpxnative-ai spec. Matches the spec exactly; `git diff` confirmed no conflict with this
+     session's own edits (different regions of the same file). Left as-is rather than reimplementing.
+   - `gpxnative-ai`'s own checklist for that spec: `:app:compileDebugKotlin` passes, no device QA
+     yet (structural refactor, `forceRecordVbr = true` at the one live call site reproduces prior
+     behavior exactly).
+
+5. Not investigated this session (out of scope, per the spec's own "does not touch" list):
+   dual-encoder-vs-shared-encoder power/thermal question (Thread 2 in that spec).
+
+## Files changed (this repo)
+
+- `encoder/src/main/java/com/pedro/encoder/utils/CodecUtil.java` — VBR log fix (#1)
+- `library/src/main/java/com/pedro/library/base/StreamBase.kt` — dead-code cleanup (#2, this
+  session) + `forceRecordVbr` decoupling (#4, concurrent gpxnative-ai session) bundled together
+- `library/src/main/java/com/pedro/library/view/OpenGlView.kt` — photo-size fix (#3)
+
+Committed as a single commit per user instruction, since both sessions are the same user's own
+work streams on the same shared checkout — not split by "who typed it in which window."
+
+## Gotcha for future sessions
+
+**This checkout is a live shared resource.** `gpxnative-ai`'s composite build (`rootencoder.local=true`,
+`rootencoder.dir=D:/Development/RootEncoder`) means any session working that app's RootEncoder-side
+changes edits *this exact directory*, uncommitted, possibly concurrently with a session working
+directly in this repo. Always `git diff`/`git status` before assuming a file's state matches what
+you last read — it may have changed underneath you between reads. Symptom hit this session: a
+`Grep` on `StreamBase.kt` showed the old buggy state, then ~15 tool calls later (after a detour
+into `gpxnative-ai`) the same file showed the fix already applied, with no edit from this session
+in between.
+
+## AI notes (scratch — optional, written by Claude for future sessions)
+None — session went cleanly once the shared-checkout mechanism was identified. The one thing
+worth internalizing: when a `rootencoder.local`-style composite build exists, treat "clean git
+status at session start" as a snapshot, not a guarantee that stays true mid-session.
+</script>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Session 3 — VBR copy-paste bug, OpenGlView photo-size bug, cross-repo validation</title>
+<style>
+  :root{--red-500:#EF3340;--red-700:#B3242B;--red-50:#FDECEC;--paper:#FAF8F5;--card:#FFFFFF;
+    --border:#DDD7CF;--border-subtle:#ECE7E0;--fg-1:#181512;--fg-2:#3D3833;--fg-3:#6B645C;
+    --ok:#12B76A;--attn:#F79009;--chip:#F1ECE5;
+    --font-display:"Barlow Condensed","Oswald","Segoe UI Semibold",system-ui,sans-serif;
+    --font-mono:"Roboto Mono",ui-monospace,"Cascadia Code",Consolas,Menlo,monospace;
+    --radius-md:4px;--radius-lg:8px;--shadow:0 1px 2px rgba(11,9,8,.06),0 4px 8px -2px rgba(11,9,8,.06);--maxw:880px;}
+  *{box-sizing:border-box;}html,body{margin:0;padding:0;}
+  body{background:var(--paper);color:var(--fg-2);font-family:var(--font-mono);font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 28px 72px;}
+  .topbar{max-width:var(--maxw);margin:0 auto;padding:26px 28px 0;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;}
+  .logo{display:inline-flex;align-items:center;gap:9px;}
+  .logo .flag{background:var(--red-500);color:#fff;font-family:var(--font-display);font-weight:800;font-size:17px;padding:3px 7px 2px;border-radius:2px;line-height:1;}
+  .logo .word{font-family:var(--font-display);font-weight:700;font-size:17px;letter-spacing:.14em;text-transform:uppercase;color:var(--fg-1);}
+  .doc-meta{font-size:11px;letter-spacing:.13em;text-transform:uppercase;color:var(--fg-3);text-align:right;}
+  .doc-meta .tag{color:var(--red-700);font-weight:700;}
+  .topdivide{max-width:var(--maxw);margin:16px auto 0;padding:0 28px;}.topdivide hr{border:0;border-top:2px solid var(--red-500);margin:0;}
+  .hero{padding:38px 0 4px;}
+  .eyebrow{font-size:11px;font-weight:700;letter-spacing:.26em;text-transform:uppercase;color:var(--red-700);margin:0 0 12px;}
+  h1{font-family:var(--font-display);font-weight:800;font-size:42px;line-height:1.05;text-transform:uppercase;color:var(--fg-1);margin:0 0 14px;}
+  .standfirst{font-size:16px;color:var(--fg-2);max-width:66ch;margin:0;}
+  .stats{display:flex;flex-wrap:wrap;gap:10px;margin-top:22px;}
+  .stat{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-md);padding:9px 15px;box-shadow:var(--shadow);}
+  .stat b{font-family:var(--font-display);font-weight:700;font-size:22px;color:var(--fg-1);display:block;line-height:1;margin-bottom:3px;}
+  .stat span{font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:var(--fg-3);}
+  details{padding-top:34px;border:0;}details+details{border-top:1px solid var(--border-subtle);}
+  summary{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;cursor:pointer;list-style:none;padding-top:6px;}
+  summary::-webkit-details-marker{display:none;}summary .htext{flex:1;}
+  summary .chev{font-family:var(--font-mono);font-weight:700;font-size:20px;line-height:1;color:var(--red-500);margin-top:16px;transition:transform .18s ease;user-select:none;}
+  details[open] summary .chev{transform:rotate(90deg);}summary:hover h2{color:var(--red-700);}
+  .count{font-family:var(--font-mono);font-size:12px;font-weight:700;color:var(--red-700);background:var(--red-50);border-radius:20px;padding:2px 9px;margin-left:10px;vertical-align:middle;}
+  .secbody{padding-top:14px;}
+  .sec-eyebrow{font-size:11px;font-weight:700;letter-spacing:.22em;text-transform:uppercase;color:var(--red-700);margin:0 0 8px;display:flex;align-items:center;gap:10px;}
+  .sec-eyebrow::before{content:"";width:18px;height:2px;background:var(--red-500);display:inline-block;}
+  h2{font-family:var(--font-display);font-weight:700;font-size:27px;line-height:1.1;text-transform:uppercase;color:var(--fg-1);margin:0;transition:color .12s;}
+  h3{font-family:var(--font-mono);font-weight:700;font-size:13.5px;color:var(--fg-1);margin:0 0 6px;}
+  p{margin:0 0 12px;}p:last-child{margin-bottom:0;}strong{color:var(--fg-1);font-weight:700;}
+  code{font-family:var(--font-mono);background:var(--chip);padding:.1em .4em;border-radius:3px;font-size:.86em;color:var(--fg-1);}
+  .cards{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:18px 20px;box-shadow:var(--shadow);}
+  .card .tag{display:inline-flex;align-items:center;gap:8px;font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px;}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block;}.dot.ok{background:var(--ok);}.dot.attn{background:var(--attn);}
+  .card p{font-size:13.5px;margin:0;}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  .nugget{background:var(--card);border:1px solid var(--border);border-left:3px solid var(--red-500);border-radius:var(--radius-md);padding:13px 16px;box-shadow:var(--shadow);}
+  .nugget h3{margin-bottom:5px;}.nugget p{font-size:12.5px;color:var(--fg-2);margin:0;}
+  ul.clean{list-style:none;margin:0;padding:0;display:grid;gap:8px;}
+  ul.clean li{position:relative;padding-left:24px;font-size:13.5px;color:var(--fg-2);}
+  ul.clean li::before{content:"";position:absolute;left:3px;top:8px;width:7px;height:7px;background:var(--red-500);border-radius:1px;transform:rotate(45deg);}
+  ul.clean li strong{color:var(--fg-1);}
+  pre{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:13px 16px;overflow-x:auto;font-size:12px;line-height:1.5;color:var(--fg-2);box-shadow:var(--shadow);margin:0 0 6px;}
+  pre code{background:none;padding:0;color:var(--fg-2);}
+  .raw pre{max-height:520px;overflow:auto;font-size:11.5px;white-space:pre-wrap;word-break:break-word;}
+  .raw .hint{font-size:11px;color:var(--fg-3);margin:0 0 8px;}
+  footer{max-width:var(--maxw);margin:48px auto 0;padding:20px 28px 36px;border-top:1px solid var(--border);display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--fg-3);}
+  .controls{max-width:var(--maxw);margin:18px auto 0;padding:0 28px;text-align:right;}
+  .controls button{font-family:var(--font-mono);font-size:10.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--fg-3);background:none;border:1px solid var(--border);border-radius:20px;padding:5px 12px;cursor:pointer;}
+  .controls button:hover{color:var(--red-700);border-color:var(--red-500);}
+  @media (max-width:640px){h1{font-size:32px;}h2{font-size:23px;}.cards,.grid2{grid-template-columns:1fr;}}
+  @media print{:root{--paper:#fff;}body{background:#fff;font-size:11pt;}.card,.nugget,.stat,pre{box-shadow:none;}
+    .controls,summary .chev{display:none;}details>.secbody{display:block!important;}
+    details,.card,.nugget{page-break-inside:avoid;}*{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <span class="logo"><span class="flag">GPX</span><span class="word">Stream</span></span>
+    <span class="doc-meta"><span class="tag">Session Recap · Internal</span><br />RootEncoder · 2026-07-12</span>
+  </div>
+  <div class="topdivide"><hr /></div>
+  <div class="wrap">
+    <div class="hero">
+      <p class="eyebrow">Session 3</p>
+      <h1>VBR copy-paste bug &amp; OpenGlView photo-size bug</h1>
+      <p class="standfirst">Traced three defects in the RootEncoder fork back to the same alexsafe-fork port commit. Fixed two, confirmed the third was already fixed by a concurrent gpxnative-ai session on this same shared checkout.</p>
+      <div class="stats">
+        <div class="stat"><b>3</b><span>Files changed</span></div>
+        <div class="stat"><b>3</b><span>Bugs fixed</span></div>
+        <div class="stat"><b>1</b><span>Cross-repo collision found</span></div>
+        <div class="stat"><b>Clean</b><span>Build verified</span></div>
+      </div>
+    </div>
+    <div class="controls">
+      <button type="button" onclick="document.querySelectorAll('details').forEach(d=>d.open=true)">Expand all</button>
+      <button type="button" onclick="document.querySelectorAll('details').forEach(d=>d.open=false)">Collapse all</button>
+    </div>
+
+    <details open>
+      <summary><span class="htext"><span class="sec-eyebrow">Status</span><h2>Fixed &amp; Verified</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <div class="cards">
+          <div class="card">
+            <span class="tag"><span class="dot ok"></span>Fixed this session</span>
+            <p><code>CodecUtil.isCBRModeSupported</code> VBR/CBR copy-paste log bug, dead debug code in <code>StreamBase.kt</code>, <code>OpenGlView.takePhoto</code> ignored-size stub.</p>
+          </div>
+          <div class="card">
+            <span class="tag"><span class="dot ok"></span>Already fixed (concurrent session)</span>
+            <p>Record-encoder VBR forcing decoupled from resolution-difference check via <code>forceRecordVbr</code> param — applied by a gpxnative-ai session editing this same checkout, uncommitted. Verified, left as-is.</p>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details open>
+      <summary><span class="htext"><span class="sec-eyebrow">Root cause</span><h2>One Port Commit, Three Bugs</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <p>All three bugs trace to <code>2fefe4c0e</code> — porting patches from a separate "alexsafe" fork (pedro 2.6.7 base) onto this fork's pedro 2.7.5 base. Classic copy-paste-during-port pattern: a constant copied instead of changed, a line duplicated into a sibling function and left commented out, debug scaffolding never stripped.</p>
+        <ul class="clean">
+          <li><strong>CodecUtil.java:420</strong> — <code>isVbrSupported</code> checked <code>BITRATE_MODE_CBR</code> twice instead of <code>_VBR</code>. Log-only, zero downstream impact — confirmed upstream never had this code at all, so no PR, local fix only.</li>
+          <li><strong>StreamBase.kt</strong> — two <code>prepareVideo</code> overloads, one had VBR-forcing active, the sibling had the identical line commented out. Fixed by a concurrent gpxnative-ai session via a new <code>forceRecordVbr</code> param, found already applied mid-session.</li>
+          <li><strong>OpenGlView.kt</strong> — <code>takePhoto(width, height, cb)</code> was a stub that dropped the size params. Confirmed unreachable from the app (only <code>GlStreamInterface</code>, which was already correct, is used) — fixed anyway for library correctness.</li>
+        </ul>
+      </div>
+    </details>
+
+    <details>
+      <summary><span class="htext"><span class="sec-eyebrow">Gotcha</span><h2>Shared Checkout, Live Concurrent Edits</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <p><code>gpxnative-ai</code>'s Gradle composite build sets <code>rootencoder.local=true</code> / <code>rootencoder.dir=D:/Development/RootEncoder</code> — pointing straight at this checkout. A session working that app's spec edits this repo's source directly, uncommitted, possibly while another session is also working here.</p>
+        <p>Symptom hit this session: a <code>Grep</code> on <code>StreamBase.kt</code> showed the old buggy VBR-forcing code; ~15 tool calls later (after a detour into <code>gpxnative-ai</code> to read its spec), the same file showed the fix already applied — with no edit from this session in between. Confirmed via <code>git diff</code> it matched the concurrent session's spec exactly rather than being a surprise regression.</p>
+        <p><strong>Takeaway:</strong> in this repo, "clean git status at session start" is a snapshot, not a guarantee that holds mid-session. Re-check before assuming a file's prior-read state still holds.</p>
+      </div>
+    </details>
+
+    <details>
+      <summary><span class="htext"><span class="sec-eyebrow">Reference</span><h2>Files Changed</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <ul class="clean">
+          <li><strong>encoder/.../utils/CodecUtil.java</strong> — VBR log fix</li>
+          <li><strong>library/.../base/StreamBase.kt</strong> — dead-code cleanup (this session) + <code>forceRecordVbr</code> decoupling (concurrent session)</li>
+          <li><strong>library/.../view/OpenGlView.kt</strong> — photo-size fix</li>
+        </ul>
+      </div>
+    </details>
+
+    <details class="raw">
+      <summary><span class="htext"><span class="sec-eyebrow">For the record</span><h2>Full Record + AI Notes</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <p class="hint">Complete raw recap + Claude's scratch notes — the same canonical block the AI reads from the top of this file.</p>
+        <pre id="fullmd"></pre>
+      </div>
+    </details>
+  </div>
+  <footer><span>GPX Stream · Session Recap 3</span><span>Internal — RootEncoder</span></footer>
+  <script>document.getElementById('fullmd').textContent=document.getElementById('recap').textContent.trim();</script>
+</body>
+</html>
