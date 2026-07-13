@@ -581,6 +581,28 @@ abstract class StreamBase(
 
   protected fun getVideoFps() = videoEncoder.fps
 
+  /**
+   * GPX fork patch: start the camera/GL half of [startSources] WITHOUT connecting or starting the
+   * encoders. Lets a caller warm a released camera ahead of [startStream] so the outbound connect
+   * doesn't begin on a cold camera. Safe subset: reuses the exact same idempotency guards as
+   * [startSources], so the later real [startSources] call (from [startStream]/[startRecord]) simply
+   * no-ops on the camera/GL lines and proceeds to start audio/encoders as normal — nothing is skipped.
+   *
+   * Does NOT set [isOnPreview] (unlike [startPreview]), so it cannot block a real preview surface
+   * from attaching later. Does NOT block on the capture session being ready to produce frames —
+   * only that the camera device itself has opened; callers must still await frame-readiness
+   * separately (e.g. via a camera-opened signal) before connecting.
+   *
+   * No-op if already streaming or already on preview (nothing to warm, or already warm).
+   */
+  fun warmSources() {
+    if (isStreaming || isOnPreview) return
+    if (!glInterface.isRunning) glInterface.start()
+    if (!videoSource.isRunning()) {
+      videoSource.start(glInterface.surfaceTexture)
+    }
+  }
+
   private fun startSources() {
     if (!glInterface.isRunning) glInterface.start()
     if (!videoSource.isRunning()) {
