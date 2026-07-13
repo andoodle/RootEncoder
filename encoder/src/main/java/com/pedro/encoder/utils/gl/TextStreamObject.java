@@ -20,12 +20,15 @@ import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Typeface;
+import android.util.Log;
 
 /**
  * Created by pedro on 23/09/17.
  */
 
 public class TextStreamObject extends StreamObjectBase {
+
+  private static final String TAG = "TextStreamObject";
 
   private int numFrames;
   private Bitmap imageBitmap;
@@ -46,8 +49,7 @@ public class TextStreamObject extends StreamObjectBase {
   public void load(String text, float textSize, int textColor, int backgroundColor, Typeface typeface) {
     numFrames = 1;
     imageBitmap = textAsBitmap(text, textSize, textColor, backgroundColor, typeface);
-    // NOTE: load() runs once per frame while a time/record overlay is active (the millisecond
-    // timecode changes every frame), so logging here floods logcat at ~60 lines/sec. Removed.
+    Log.i(TAG, "finish load text");
   }
 
   @Override
