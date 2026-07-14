@@ -48,11 +48,19 @@ import com.pedro.library.view.preview.MultiPreviewConfig
 import com.pedro.library.view.preview.PreviewSurfaceInfo
 import java.util.concurrent.BlockingQueue
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
+import java.util.concurrent.Future
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 
+// Bound for stop()'s awaitTermination on the queued releaseSurfaceManagers() task — long enough for
+// a normal release, short enough that a caller blocked on stop() (which can reach the main thread via
+// StreamBase.stopPreview()'s SurfaceHolder callback path) is never stuck for long.
+private const val STOP_RELEASE_AWAIT_MS = 300L
 
 /**
  * Created by pedro on 14/3/22.
@@ -97,6 +105,8 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
   private var isStreamVerticalFlip = false
   private var aspectRatioMode = AspectRatioMode.Adjust
   private var executor: ExecutorService? = null
+  // Prior teardown must complete successfully before shared GL state is reused.
+  private var pendingRelease: Future<*>? = null
   private val fpsLimiter = FpsLimiter()
   private val forceRender = ForceRenderer()
   var autoHandleOrientation = false
@@ -230,6 +240,32 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
   }
 
   override fun start() {
+    // Never proceed into shared GL state unless the prior release completed normally; retry belongs
+    // to the caller, not this class. Always call get() (not just when !isDone) so an already-failed
+    // release isn't skipped.
+    pendingRelease?.let { release ->
+      try {
+        release.get(STOP_RELEASE_AWAIT_MS, TimeUnit.MILLISECONDS)
+      } catch (e: TimeoutException) {
+        throw IllegalStateException(
+          "GlStreamInterface.start(): prior stop() release did not complete within " +
+            "${STOP_RELEASE_AWAIT_MS}ms; refusing to reuse shared GL state. Caller must retry " +
+            "the whole start operation.", e
+        )
+      } catch (e: ExecutionException) {
+        throw IllegalStateException(
+          "GlStreamInterface.start(): prior stop() release failed; refusing to reuse shared GL state.",
+          e.cause ?: e
+        )
+      } catch (e: InterruptedException) {
+        Thread.currentThread().interrupt()
+        throw IllegalStateException(
+          "GlStreamInterface.start(): interrupted waiting for prior stop() release; refusing to " +
+            "reuse shared GL state.", e
+        )
+      }
+    }
+    pendingRelease = null
     threadQueue.clear()
     executor?.shutdownNow()
     executor = null
@@ -266,10 +302,20 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
     threadQueue.clear()
     val executor = this.executor
     if (executor != null) {
-      executor.secureSubmit(100) { releaseSurfaceManagers() }
-      executor.shutdownNow()
+      // Graceful shutdown (not shutdownNow) lets the submitted release run instead of racing to
+      // cancel it; tracked via submit so the Future survives this bounded wait for start() to observe.
+      pendingRelease = executor.submit { releaseSurfaceManagers() }
+      executor.shutdown()
+      try {
+        executor.awaitTermination(STOP_RELEASE_AWAIT_MS, TimeUnit.MILLISECONDS)
+      } catch (e: InterruptedException) {
+        Thread.currentThread().interrupt()
+      }
       this.executor = null
-    } else releaseSurfaceManagers()
+    } else if (pendingRelease == null) {
+      // release() can call stop() twice; do not race an already-tracked teardown.
+      releaseSurfaceManagers()
+    }
   }
 
   private fun releaseSurfaceManagers() {

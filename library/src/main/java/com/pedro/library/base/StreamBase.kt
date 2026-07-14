@@ -237,9 +237,24 @@ abstract class StreamBase(
   fun startStream(endPoint: String) {
     if (isStreaming) throw IllegalStateException("Stream already started, stopStream before startStream again")
     isStreaming = true
-    startStreamImp(endPoint)
-      if (!isRecording)  startSources()
-    requestKeyframe()
+    // Keep state and transport transactional if source startup fails.
+    var transportStarted = false
+    try {
+      startStreamImp(endPoint)
+      transportStarted = true
+      if (!isRecording) startSources()
+      requestKeyframe()
+    } catch (e: RuntimeException) {
+      isStreaming = false
+      if (transportStarted) {
+        try {
+          stopStreamImp()
+        } catch (cleanup: RuntimeException) {
+          e.addSuppressed(cleanup)
+        }
+      }
+      throw e
+    }
   }
 
   /**
@@ -335,8 +350,18 @@ abstract class StreamBase(
       videoEncoderRecord.requestKeyframe()
     }
     recordController.startRecord(path, listener, usedTracks)
-    if (!isStreaming) startSources()
-    requestKeyframe()
+    // Keep recording state transactional if source startup fails.
+    try {
+      if (!isStreaming) startSources()
+      requestKeyframe()
+    } catch (e: RuntimeException) {
+      try {
+        recordController.stopRecord()
+      } catch (cleanup: RuntimeException) {
+        e.addSuppressed(cleanup)
+      }
+      throw e
+    }
   }
 
   /**
@@ -411,11 +436,12 @@ abstract class StreamBase(
   fun startPreview(surface: Surface, width: Int, height: Int) {
     if (!surface.isValid) throw IllegalArgumentException("Make sure the Surface is valid")
     if (isOnPreview) throw IllegalStateException("Preview already started, stopPreview before startPreview again")
-    isOnPreview = true
+    // isOnPreview must not flip true until sources actually started.
     if (!glInterface.isRunning) glInterface.start()
     if (!videoSource.isRunning()) {
       videoSource.start(glInterface.surfaceTexture)
     }
+    isOnPreview = true
     glInterface.attachPreview(surface)
     glInterface.setPreviewResolution(width, height)
   }
