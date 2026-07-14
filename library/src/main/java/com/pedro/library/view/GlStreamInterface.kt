@@ -334,7 +334,18 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
         Thread.currentThread().interrupt()
       }
       this.executor = null
-    } else releaseSurfaceManagers()
+    } else if (pendingRelease == null) {
+      // Round 5 review: StreamBase.release() calls stopPreview() (reaches glInterface.stop() once)
+      // then unconditionally calls stopSources(), whose own `if (!isOnPreview) glInterface.stop()`
+      // fires again since stopPreview() just flipped isOnPreview false — a genuine double-stop() in
+      // one release() call, live via PublisherHolder.release()/ensureMatchesTypeAndSources(). If the
+      // first stop()'s bounded wait timed out, executor is already null while pendingRelease is still
+      // tracking that in-flight release; without this guard, the second stop() would take this branch
+      // and call releaseSurfaceManagers() again, concurrently with the still-running first release, on
+      // the same shared GL objects. A repeated stop while a release is still pending is a no-op —
+      // pendingRelease is left for start() to observe, same as the very first stop() left it.
+      releaseSurfaceManagers()
+    }
   }
 
   private fun releaseSurfaceManagers() {
