@@ -690,7 +690,16 @@ public abstract class Camera1Base {
   public void startStream(String url) {
     streaming = true;
     if (!recordController.isRunning()) {
-      startEncoders();
+      // Adversarial review on RootEncoder PR #4: glInterface.start() (inside startEncoders'
+      // prepareGlView) can now throw if a prior stop()'s GL release hasn't completed. Roll
+      // `streaming` back before rethrowing so a failed start doesn't leave this object permanently
+      // believing it's streaming when startStreamImp never ran.
+      try {
+        startEncoders();
+      } catch (RuntimeException e) {
+        streaming = false;
+        throw e;
+      }
     } else {
       requestKeyFrame();
     }

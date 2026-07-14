@@ -411,11 +411,14 @@ abstract class StreamBase(
   fun startPreview(surface: Surface, width: Int, height: Int) {
     if (!surface.isValid) throw IllegalArgumentException("Make sure the Surface is valid")
     if (isOnPreview) throw IllegalStateException("Preview already started, stopPreview before startPreview again")
-    isOnPreview = true
+    // Adversarial review on PR #4: glInterface.start() can now throw (prior release not confirmed
+    // complete) — isOnPreview must not flip true until the sources it gates actually started, or a
+    // failed start leaves preview state permanently (and incorrectly) "on".
     if (!glInterface.isRunning) glInterface.start()
     if (!videoSource.isRunning()) {
       videoSource.start(glInterface.surfaceTexture)
     }
+    isOnPreview = true
     glInterface.attachPreview(surface)
     glInterface.setPreviewResolution(width, height)
   }

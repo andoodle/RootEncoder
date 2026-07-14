@@ -51,6 +51,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Future
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -243,25 +244,35 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
   }
 
   override fun start() {
-    // Completion barrier for the previous stop()'s release — genuinely wait for it, no timeout
-    // escape hatch. Adversarial review on PR #4 correctly rejected an earlier bounded-then-proceed
-    // version of this wait: a timeout that falls through into surfaceManager.release()/eglSetup()
-    // below only narrows the stale-handle race window (300ms -> 600ms) instead of closing it —
-    // "cleanup completion must be guaranteed before reuse," not merely probable. releaseSurfaceManagers()
-    // is fast synchronous GL teardown (EGL/FBO release calls) under normal operation; a genuinely
-    // wedged release thread is a separate, pre-existing failure mode a timeout here can't safely
-    // paper over anyway — it would trade a rare, visible ANR for a silent stale-GL-handle corruption,
-    // the exact bug class this PR exists to remove. stop()'s own bounded wait is untouched: it only
-    // delays stop() returning and never reuses shared state, so it stays safe as-is.
+    // Completion barrier for the previous stop()'s release. Adversarial review round 3 on PR #4:
+    // no retry inside this class, and never proceed into shared GL state on anything but a normal
+    // (successful) completion. A bounded wait keeps this main-thread-safe (start() is reachable via
+    // StreamBase's SurfaceHolder callback path, same as stop()); on timeout, execution failure, or
+    // interruption, this throws instead of falling through — pendingRelease is deliberately NOT
+    // cleared on any of those paths, so a caller-level retry of the whole start operation re-checks
+    // the SAME release next time instead of silently reusing stale state. Retry policy belongs one
+    // layer up (the caller's own recovery path), never silently inside GlStreamInterface.
     pendingRelease?.let { release ->
       if (!release.isDone) {
         try {
-          release.get()
+          release.get(STOP_RELEASE_AWAIT_MS, TimeUnit.MILLISECONDS)
+        } catch (e: TimeoutException) {
+          throw IllegalStateException(
+            "GlStreamInterface.start(): prior stop() release did not complete within " +
+              "${STOP_RELEASE_AWAIT_MS}ms; refusing to reuse shared GL state. Caller must retry " +
+              "the whole start operation.", e
+          )
         } catch (e: ExecutionException) {
-          // releaseSurfaceManagers() threw — already surfaced wherever the executor reports
-          // uncaught exceptions; nothing further to do here.
+          throw IllegalStateException(
+            "GlStreamInterface.start(): prior stop() release failed; refusing to reuse shared GL state.",
+            e.cause ?: e
+          )
         } catch (e: InterruptedException) {
           Thread.currentThread().interrupt()
+          throw IllegalStateException(
+            "GlStreamInterface.start(): interrupted waiting for prior stop() release; refusing to " +
+              "reuse shared GL state.", e
+          )
         }
       }
     }
