@@ -105,11 +105,7 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
   private var isStreamVerticalFlip = false
   private var aspectRatioMode = AspectRatioMode.Adjust
   private var executor: ExecutorService? = null
-  // Adversarial review on PR #4: stop()'s awaitTermination bound is main-thread-safe but was
-  // discarding the release task's completion when it timed out — this.executor got nulled either
-  // way, so start() had no way left to know a prior releaseSurfaceManagers() was still running on
-  // its own (now-orphaned) thread. Track the Future independently of the executor field so start()
-  // can await the SAME release before reusing surfaceManager/mainRender, instead of racing it.
+  // Prior teardown must complete successfully before shared GL state is reused.
   private var pendingRelease: Future<*>? = null
   private val fpsLimiter = FpsLimiter()
   private val forceRender = ForceRenderer()
@@ -244,18 +240,9 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
   }
 
   override fun start() {
-    // Completion barrier for the previous stop()'s release. Adversarial review round 3 on PR #4:
-    // no retry inside this class, and never proceed into shared GL state on anything but a normal
-    // (successful) completion. A bounded wait keeps this main-thread-safe (start() is reachable via
-    // StreamBase's SurfaceHolder callback path, same as stop()); on timeout, execution failure, or
-    // interruption, this throws instead of falling through — pendingRelease is deliberately NOT
-    // cleared on any of those paths, so a caller-level retry of the whole start operation re-checks
-    // the SAME release next time instead of silently reusing stale state. Retry policy belongs one
-    // layer up (the caller's own recovery path), never silently inside GlStreamInterface.
-    // Round 4 review: Future.isDone() is true for exceptional completion too, not just success — a
-    // release that failed BEFORE this check would skip get() entirely under the old `if (!isDone)`
-    // guard, clearing pendingRelease and reusing shared state despite the failure. Always call get()
-    // (bound); a completed future returns immediately either way, success or exception.
+    // Never proceed into shared GL state unless the prior release completed normally; retry belongs
+    // to the caller, not this class. Always call get() (not just when !isDone) so an already-failed
+    // release isn't skipped.
     pendingRelease?.let { release ->
       try {
         release.get(STOP_RELEASE_AWAIT_MS, TimeUnit.MILLISECONDS)
@@ -315,17 +302,8 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
     threadQueue.clear()
     val executor = this.executor
     if (executor != null) {
-      // Bug fix: submitting the release then immediately calling shutdownNow() raced its own cleanup
-      // — shutdownNow() drains/cancels queued-but-not-yet-started work, so if the single render thread
-      // was still mid-draw() when stop() ran, this release could be dropped entirely. The next start()
-      // then builds a fresh EGL context while the old mainRender/SurfaceManager GL objects (FBO/texture
-      // handles) were never released, and a filter still holding those stale handles throws a GL error
-      // (GL_INVALID_VALUE 1281) on its next draw. Graceful shutdown() (not shutdownNow()) lets the
-      // already-submitted release run to completion instead of racing to cancel it; awaitTermination
-      // genuinely waits for that — bounded, since this can reach the main thread via StreamBase's
-      // SurfaceHolder callback path, so a stuck release must not block the caller indefinitely.
-      // submit (not execute) so the Future survives past this bounded wait — start() awaits the
-      // SAME Future below if it's still running when we give up here (see pendingRelease).
+      // Graceful shutdown (not shutdownNow) lets the submitted release run instead of racing to
+      // cancel it; tracked via submit so the Future survives this bounded wait for start() to observe.
       pendingRelease = executor.submit { releaseSurfaceManagers() }
       executor.shutdown()
       try {
@@ -335,15 +313,7 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
       }
       this.executor = null
     } else if (pendingRelease == null) {
-      // Round 5 review: StreamBase.release() calls stopPreview() (reaches glInterface.stop() once)
-      // then unconditionally calls stopSources(), whose own `if (!isOnPreview) glInterface.stop()`
-      // fires again since stopPreview() just flipped isOnPreview false — a genuine double-stop() in
-      // one release() call, live via PublisherHolder.release()/ensureMatchesTypeAndSources(). If the
-      // first stop()'s bounded wait timed out, executor is already null while pendingRelease is still
-      // tracking that in-flight release; without this guard, the second stop() would take this branch
-      // and call releaseSurfaceManagers() again, concurrently with the still-running first release, on
-      // the same shared GL objects. A repeated stop while a release is still pending is a no-op —
-      // pendingRelease is left for start() to observe, same as the very first stop() left it.
+      // release() can call stop() twice; do not race an already-tracked teardown.
       releaseSurfaceManagers()
     }
   }

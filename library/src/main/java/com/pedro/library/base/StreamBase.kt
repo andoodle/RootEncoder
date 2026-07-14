@@ -237,10 +237,7 @@ abstract class StreamBase(
   fun startStream(endPoint: String) {
     if (isStreaming) throw IllegalStateException("Stream already started, stopStream before startStream again")
     isStreaming = true
-    // Round 4 review on RootEncoder PR #4: startSources() can now throw (glInterface.start() refusing
-    // to reuse GL state after a failed prior release). Roll isStreaming back and tear down the
-    // already-connected transport on failure instead of leaving this object believing it's streaming
-    // with sources never attached.
+    // Keep state and transport transactional if source startup fails.
     var transportStarted = false
     try {
       startStreamImp(endPoint)
@@ -353,11 +350,7 @@ abstract class StreamBase(
       videoEncoderRecord.requestKeyframe()
     }
     recordController.startRecord(path, listener, usedTracks)
-    // Round 4 review on RootEncoder PR #4: startSources() can now throw. isRecording reads live off
-    // recordController.isRunning(), so a failure here would otherwise leave recording "active" with
-    // no sources ever attached — stop the record controller before rethrowing. No source teardown
-    // needed: the new GL exception surfaces at the first line of startSources(), before any source
-    // attaches.
+    // Keep recording state transactional if source startup fails.
     try {
       if (!isStreaming) startSources()
       requestKeyframe()
@@ -443,9 +436,7 @@ abstract class StreamBase(
   fun startPreview(surface: Surface, width: Int, height: Int) {
     if (!surface.isValid) throw IllegalArgumentException("Make sure the Surface is valid")
     if (isOnPreview) throw IllegalStateException("Preview already started, stopPreview before startPreview again")
-    // Adversarial review on PR #4: glInterface.start() can now throw (prior release not confirmed
-    // complete) — isOnPreview must not flip true until the sources it gates actually started, or a
-    // failed start leaves preview state permanently (and incorrectly) "on".
+    // isOnPreview must not flip true until sources actually started.
     if (!glInterface.isRunning) glInterface.start()
     if (!videoSource.isRunning()) {
       videoSource.start(glInterface.surfaceTexture)
