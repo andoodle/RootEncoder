@@ -50,9 +50,14 @@ import java.util.concurrent.BlockingQueue
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 
+// Bound for stop()'s awaitTermination on the queued releaseSurfaceManagers() task — long enough for
+// a normal release, short enough that a caller blocked on stop() (which can reach the main thread via
+// StreamBase.stopPreview()'s SurfaceHolder callback path) is never stuck for long.
+private const val STOP_RELEASE_AWAIT_MS = 300L
 
 /**
  * Created by pedro on 14/3/22.
@@ -266,8 +271,22 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
     threadQueue.clear()
     val executor = this.executor
     if (executor != null) {
-      executor.secureSubmit(100) { releaseSurfaceManagers() }
-      executor.shutdownNow()
+      // Bug fix: submitting the release then immediately calling shutdownNow() raced its own cleanup
+      // — shutdownNow() drains/cancels queued-but-not-yet-started work, so if the single render thread
+      // was still mid-draw() when stop() ran, this release could be dropped entirely. The next start()
+      // then builds a fresh EGL context while the old mainRender/SurfaceManager GL objects (FBO/texture
+      // handles) were never released, and a filter still holding those stale handles throws a GL error
+      // (GL_INVALID_VALUE 1281) on its next draw. Graceful shutdown() (not shutdownNow()) lets the
+      // already-submitted release run to completion instead of racing to cancel it; awaitTermination
+      // genuinely waits for that — bounded, since this can reach the main thread via StreamBase's
+      // SurfaceHolder callback path, so a stuck release must not block the caller indefinitely.
+      executor.execute { releaseSurfaceManagers() }
+      executor.shutdown()
+      try {
+        executor.awaitTermination(STOP_RELEASE_AWAIT_MS, TimeUnit.MILLISECONDS)
+      } catch (e: InterruptedException) {
+        Thread.currentThread().interrupt()
+      }
       this.executor = null
     } else releaseSurfaceManagers()
   }
