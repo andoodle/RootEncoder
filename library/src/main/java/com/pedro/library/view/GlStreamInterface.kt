@@ -51,7 +51,6 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Future
-import java.util.concurrent.TimeoutException
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -244,18 +243,20 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
   }
 
   override fun start() {
-    // Completion barrier for the previous stop()'s release, independent of whether its own bounded
-    // awaitTermination succeeded: if that timed out, releaseSurfaceManagers() may still be running
-    // on its orphaned thread. Reusing surfaceManager/mainRender below without waiting reproduces the
-    // exact stale-handle race (GL error 1281) PR #4 fixes at the stop() end, just moved to start().
+    // Completion barrier for the previous stop()'s release — genuinely wait for it, no timeout
+    // escape hatch. Adversarial review on PR #4 correctly rejected an earlier bounded-then-proceed
+    // version of this wait: a timeout that falls through into surfaceManager.release()/eglSetup()
+    // below only narrows the stale-handle race window (300ms -> 600ms) instead of closing it —
+    // "cleanup completion must be guaranteed before reuse," not merely probable. releaseSurfaceManagers()
+    // is fast synchronous GL teardown (EGL/FBO release calls) under normal operation; a genuinely
+    // wedged release thread is a separate, pre-existing failure mode a timeout here can't safely
+    // paper over anyway — it would trade a rare, visible ANR for a silent stale-GL-handle corruption,
+    // the exact bug class this PR exists to remove. stop()'s own bounded wait is untouched: it only
+    // delays stop() returning and never reuses shared state, so it stays safe as-is.
     pendingRelease?.let { release ->
       if (!release.isDone) {
         try {
-          release.get(STOP_RELEASE_AWAIT_MS, TimeUnit.MILLISECONDS)
-        } catch (e: TimeoutException) {
-          // Still not done — a stuck release must not hang start() forever (this can reach the main
-          // thread the same way stop() can). Proceed with the same bounded-wait tradeoff stop() already
-          // accepts; genuinely wedged cleanup is a separate, pre-existing failure mode.
+          release.get()
         } catch (e: ExecutionException) {
           // releaseSurfaceManagers() threw — already surfaced wherever the executor reports
           // uncaught exceptions; nothing further to do here.
