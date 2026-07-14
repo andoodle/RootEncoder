@@ -48,7 +48,10 @@ import com.pedro.library.view.preview.MultiPreviewConfig
 import com.pedro.library.view.preview.PreviewSurfaceInfo
 import java.util.concurrent.BlockingQueue
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
+import java.util.concurrent.Future
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -102,6 +105,12 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
   private var isStreamVerticalFlip = false
   private var aspectRatioMode = AspectRatioMode.Adjust
   private var executor: ExecutorService? = null
+  // Adversarial review on PR #4: stop()'s awaitTermination bound is main-thread-safe but was
+  // discarding the release task's completion when it timed out — this.executor got nulled either
+  // way, so start() had no way left to know a prior releaseSurfaceManagers() was still running on
+  // its own (now-orphaned) thread. Track the Future independently of the executor field so start()
+  // can await the SAME release before reusing surfaceManager/mainRender, instead of racing it.
+  private var pendingRelease: Future<*>? = null
   private val fpsLimiter = FpsLimiter()
   private val forceRender = ForceRenderer()
   var autoHandleOrientation = false
@@ -235,6 +244,27 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
   }
 
   override fun start() {
+    // Completion barrier for the previous stop()'s release, independent of whether its own bounded
+    // awaitTermination succeeded: if that timed out, releaseSurfaceManagers() may still be running
+    // on its orphaned thread. Reusing surfaceManager/mainRender below without waiting reproduces the
+    // exact stale-handle race (GL error 1281) PR #4 fixes at the stop() end, just moved to start().
+    pendingRelease?.let { release ->
+      if (!release.isDone) {
+        try {
+          release.get(STOP_RELEASE_AWAIT_MS, TimeUnit.MILLISECONDS)
+        } catch (e: TimeoutException) {
+          // Still not done — a stuck release must not hang start() forever (this can reach the main
+          // thread the same way stop() can). Proceed with the same bounded-wait tradeoff stop() already
+          // accepts; genuinely wedged cleanup is a separate, pre-existing failure mode.
+        } catch (e: ExecutionException) {
+          // releaseSurfaceManagers() threw — already surfaced wherever the executor reports
+          // uncaught exceptions; nothing further to do here.
+        } catch (e: InterruptedException) {
+          Thread.currentThread().interrupt()
+        }
+      }
+    }
+    pendingRelease = null
     threadQueue.clear()
     executor?.shutdownNow()
     executor = null
@@ -280,7 +310,9 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
       // already-submitted release run to completion instead of racing to cancel it; awaitTermination
       // genuinely waits for that — bounded, since this can reach the main thread via StreamBase's
       // SurfaceHolder callback path, so a stuck release must not block the caller indefinitely.
-      executor.execute { releaseSurfaceManagers() }
+      // submit (not execute) so the Future survives past this bounded wait — start() awaits the
+      // SAME Future below if it's still running when we give up here (see pendingRelease).
+      pendingRelease = executor.submit { releaseSurfaceManagers() }
       executor.shutdown()
       try {
         executor.awaitTermination(STOP_RELEASE_AWAIT_MS, TimeUnit.MILLISECONDS)
