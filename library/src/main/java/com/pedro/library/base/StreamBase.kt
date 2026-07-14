@@ -237,9 +237,27 @@ abstract class StreamBase(
   fun startStream(endPoint: String) {
     if (isStreaming) throw IllegalStateException("Stream already started, stopStream before startStream again")
     isStreaming = true
-    startStreamImp(endPoint)
-      if (!isRecording)  startSources()
-    requestKeyframe()
+    // Round 4 review on RootEncoder PR #4: startSources() can now throw (glInterface.start() refusing
+    // to reuse GL state after a failed prior release). Roll isStreaming back and tear down the
+    // already-connected transport on failure instead of leaving this object believing it's streaming
+    // with sources never attached.
+    var transportStarted = false
+    try {
+      startStreamImp(endPoint)
+      transportStarted = true
+      if (!isRecording) startSources()
+      requestKeyframe()
+    } catch (e: RuntimeException) {
+      isStreaming = false
+      if (transportStarted) {
+        try {
+          stopStreamImp()
+        } catch (cleanup: RuntimeException) {
+          e.addSuppressed(cleanup)
+        }
+      }
+      throw e
+    }
   }
 
   /**
@@ -335,8 +353,22 @@ abstract class StreamBase(
       videoEncoderRecord.requestKeyframe()
     }
     recordController.startRecord(path, listener, usedTracks)
-    if (!isStreaming) startSources()
-    requestKeyframe()
+    // Round 4 review on RootEncoder PR #4: startSources() can now throw. isRecording reads live off
+    // recordController.isRunning(), so a failure here would otherwise leave recording "active" with
+    // no sources ever attached — stop the record controller before rethrowing. No source teardown
+    // needed: the new GL exception surfaces at the first line of startSources(), before any source
+    // attaches.
+    try {
+      if (!isStreaming) startSources()
+      requestKeyframe()
+    } catch (e: RuntimeException) {
+      try {
+        recordController.stopRecord()
+      } catch (cleanup: RuntimeException) {
+        e.addSuppressed(cleanup)
+      }
+      throw e
+    }
   }
 
   /**

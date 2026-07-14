@@ -252,28 +252,30 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
     // cleared on any of those paths, so a caller-level retry of the whole start operation re-checks
     // the SAME release next time instead of silently reusing stale state. Retry policy belongs one
     // layer up (the caller's own recovery path), never silently inside GlStreamInterface.
+    // Round 4 review: Future.isDone() is true for exceptional completion too, not just success — a
+    // release that failed BEFORE this check would skip get() entirely under the old `if (!isDone)`
+    // guard, clearing pendingRelease and reusing shared state despite the failure. Always call get()
+    // (bound); a completed future returns immediately either way, success or exception.
     pendingRelease?.let { release ->
-      if (!release.isDone) {
-        try {
-          release.get(STOP_RELEASE_AWAIT_MS, TimeUnit.MILLISECONDS)
-        } catch (e: TimeoutException) {
-          throw IllegalStateException(
-            "GlStreamInterface.start(): prior stop() release did not complete within " +
-              "${STOP_RELEASE_AWAIT_MS}ms; refusing to reuse shared GL state. Caller must retry " +
-              "the whole start operation.", e
-          )
-        } catch (e: ExecutionException) {
-          throw IllegalStateException(
-            "GlStreamInterface.start(): prior stop() release failed; refusing to reuse shared GL state.",
-            e.cause ?: e
-          )
-        } catch (e: InterruptedException) {
-          Thread.currentThread().interrupt()
-          throw IllegalStateException(
-            "GlStreamInterface.start(): interrupted waiting for prior stop() release; refusing to " +
-              "reuse shared GL state.", e
-          )
-        }
+      try {
+        release.get(STOP_RELEASE_AWAIT_MS, TimeUnit.MILLISECONDS)
+      } catch (e: TimeoutException) {
+        throw IllegalStateException(
+          "GlStreamInterface.start(): prior stop() release did not complete within " +
+            "${STOP_RELEASE_AWAIT_MS}ms; refusing to reuse shared GL state. Caller must retry " +
+            "the whole start operation.", e
+        )
+      } catch (e: ExecutionException) {
+        throw IllegalStateException(
+          "GlStreamInterface.start(): prior stop() release failed; refusing to reuse shared GL state.",
+          e.cause ?: e
+        )
+      } catch (e: InterruptedException) {
+        Thread.currentThread().interrupt()
+        throw IllegalStateException(
+          "GlStreamInterface.start(): interrupted waiting for prior stop() release; refusing to " +
+            "reuse shared GL state.", e
+        )
       }
     }
     pendingRelease = null
