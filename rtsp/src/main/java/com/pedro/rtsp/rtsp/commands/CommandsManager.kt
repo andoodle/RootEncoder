@@ -33,6 +33,7 @@ import com.pedro.rtsp.utils.RtpTracks
 import com.pedro.rtsp.utils.encodeToString
 import com.pedro.rtsp.utils.getData
 import java.io.IOException
+import java.net.DatagramSocket
 import java.nio.ByteBuffer
 import java.util.regex.Pattern
 
@@ -49,6 +50,8 @@ open class CommandsManager {
     private set
   var path: String? = null
     private set
+  private val urlHost: String
+    get() = host?.let { if (it.contains(":")) "[$it]" else it } ?: ""
   var sps: ByteBuffer? = null
     private set
   var pps: ByteBuffer? = null
@@ -171,11 +174,14 @@ open class CommandsManager {
         AudioCodec.OPUS -> createOpusBody(rtpTracks.trackAudio)
       }
     }
+    val isIpv6 = host?.contains(":") == true
+    val addressType = if (isIpv6) "IP6" else "IP4"
+    val localhost = if (isIpv6) "::1" else "127.0.0.1"
     return "v=0\r\n" +
-        "o=- $timeStamp $timeStamp IN IP4 127.0.0.1\r\n" +
+        "o=- $timeStamp $timeStamp IN $addressType $localhost\r\n" +
         "s=Unnamed\r\n" +
         "i=N/A\r\n" +
-        "c=IN IP4 $host\r\n" +
+        "c=IN $addressType $host\r\n" +
         "t=0 0\r\n" +
         "a=recvonly\r\n" +
         videoBody + audioBody
@@ -200,7 +206,7 @@ open class CommandsManager {
 
   //Commands
   fun createOptions(): String {
-    val uri = "rtsp://$host:$port$path"
+    val uri = "rtsp://$urlHost:$port$path"
     val options = "OPTIONS $uri RTSP/1.0\r\n" + addHeaders(Method.OPTIONS, uri) + "\r\n"
     Log.i(TAG, options)
     return options
@@ -213,7 +219,7 @@ open class CommandsManager {
     } else {
       "TCP;unicast;interleaved=${2 * track}-${2 * track + 1};mode=record"
     }
-    val uri = "rtsp://$host:$port$path/streamid=$track"
+    val uri = "rtsp://$urlHost:$port$path/streamid=$track"
     val setup = "SETUP $uri RTSP/1.0\r\n" +
         "Transport: RTP/AVP/$params\r\n" +
         addHeaders(Method.SETUP, uri) + "\r\n"
@@ -222,7 +228,7 @@ open class CommandsManager {
   }
 
   fun createRecord(): String {
-    val uri = "rtsp://$host:$port$path"
+    val uri = "rtsp://$urlHost:$port$path"
     val record = "RECORD $uri RTSP/1.0\r\n" +
         "Range: npt=0.000-\r\n" + addHeaders(Method.RECORD, uri) + "\r\n"
     Log.i(TAG, record)
@@ -231,7 +237,7 @@ open class CommandsManager {
 
   fun createAnnounce(): String {
     val body = createBody()
-    val uri = "rtsp://$host:$port$path"
+    val uri = "rtsp://$urlHost:$port$path"
     val announce = "ANNOUNCE $uri RTSP/1.0\r\n" +
         "Content-Type: application/sdp\r\n" +
         addHeaders(Method.ANNOUNCE, uri) +
@@ -253,7 +259,7 @@ open class CommandsManager {
   }
 
   fun createTeardown(): String {
-    val uri = "rtsp://$host:$port$path"
+    val uri = "rtsp://$urlHost:$port$path"
     val teardown = "TEARDOWN $uri RTSP/1.0\r\n" + addHeaders(Method.TEARDOWN, uri) + "\r\n"
     Log.i(TAG, teardown)
     return teardown
@@ -308,5 +314,56 @@ open class CommandsManager {
 
   fun updateTimestamp() {
     timeStamp = TimeUtils.getCurrentTimeNano()
+  }
+
+  fun findFreeClientPorts(): Boolean {
+    return runCatching {
+      val freePorts = findFreeUdpPortPairs()
+      videoClientPorts[0] = freePorts[0]
+      videoClientPorts[1] = freePorts[1]
+      audioClientPorts[0] = freePorts[2]
+      audioClientPorts[1] = freePorts[3]
+      true
+    }.getOrDefault(false)
+  }
+
+  fun findFreeServerPorts(): Boolean {
+    return runCatching {
+      val freePorts = findFreeUdpPortPairs()
+      videoServerPorts[0] = freePorts[0]
+      videoServerPorts[1] = freePorts[1]
+      audioServerPorts[0] = freePorts[2]
+      audioServerPorts[1] = freePorts[3]
+      true
+    }.getOrDefault(false)
+  }
+
+  @Throws(IOException::class)
+  private fun findFreeUdpPortPairs(): IntArray {
+    val reservedSockets = mutableListOf<DatagramSocket>()
+    try {
+      val videoPort = reservePortPair(reservedSockets)
+      val audioPort = reservePortPair(reservedSockets)
+      return intArrayOf(videoPort, videoPort + 1, audioPort, audioPort + 1)
+    } finally {
+      reservedSockets.forEach { runCatching { it.close() } }
+    }
+  }
+
+  //RTP must use an even port and RTCP the next odd port (RFC 3550)
+  @Throws(IOException::class)
+  private fun reservePortPair(reservedSockets: MutableList<DatagramSocket>): Int {
+    repeat(100) {
+      val seed = DatagramSocket(0)
+      val candidate = seed.localPort.let { if (it % 2 == 0) it else it + 1 }
+      seed.close()
+      if (candidate >= 65535) return@repeat
+      try {
+        reservedSockets.add(DatagramSocket(candidate))
+        reservedSockets.add(DatagramSocket(candidate + 1))
+        return candidate
+      } catch (_: IOException) { }
+    }
+    throw IOException("No free UDP port pair available")
   }
 }

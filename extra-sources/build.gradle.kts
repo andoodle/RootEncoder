@@ -6,28 +6,19 @@ plugins {
 
 android {
     namespace = "com.pedro.extrasources"
-    compileSdk = 37
+    //noinspection GradleDependency
+    compileSdk = 36
 
     defaultConfig {
         minSdk = 21
         lint.targetSdk = 37
     }
-    buildTypes {
-        release {
-            isMinifyEnabled = false
-        }
-    }
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
+    testOptions {
+        unitTests.isReturnDefaultValues = true
     }
     publishing {
         singleVariant("release")
     }
-}
-
-kotlin {
-    jvmToolchain(17)
 }
 
 afterEvaluate {

@@ -1,8 +1,22 @@
 allprojects {
   group = "com.github.pedroSG94"
-  version = "2.7.5"
+  version = "2.8.0"
 
   plugins.withType<PublishingPlugin> {
+    configure<com.android.build.api.dsl.LibraryExtension> {
+      compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+      }
+    }
+    configure<org.jetbrains.kotlin.gradle.dsl.KotlinAndroidProjectExtension> {
+      jvmToolchain(17)
+      coreLibrariesVersion = "2.2.21"
+      compilerOptions {
+        languageVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_2_2)
+        apiVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_2_2)
+      }
+    }
     configure<PublishingExtension> {
       publications.withType<MavenPublication>().all {
         pom {

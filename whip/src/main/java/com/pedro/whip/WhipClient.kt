@@ -20,6 +20,7 @@ import com.pedro.rtsp.utils.RtpConstants
 import com.pedro.whip.dtls.DtlsClient
 import com.pedro.whip.dtls.DtlsConnection
 import com.pedro.whip.dtls.DtlsTransport
+import com.pedro.whip.utils.Network
 import com.pedro.whip.webrtc.CandidateType
 import com.pedro.whip.webrtc.CommandsManager
 import com.pedro.whip.webrtc.stun.AttributeType
@@ -38,6 +39,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withTimeoutOrNull
+import java.net.Inet6Address
 import java.net.URISyntaxException
 import java.nio.ByteBuffer
 import javax.net.ssl.TrustManager
@@ -269,8 +271,12 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                     val remoteFrag = commandsManager.remoteSdpInfo?.uFrag ?: return@launch
                     val priority = commandsManager.calculatePriority(CandidateType.LOCAL, 65535L, 1)
 
+                    val availableFamilies = Network.getNetworks(onlyV4 = false).map { it is Inet6Address }.toSet()
                     val remoteCandidates = commandsManager.remoteSdpInfo?.candidates?.filter {
-                        it.getRealHost() != "127.0.0.1"
+                        val candidateHost = it.getRealHost()
+                        candidateHost != "127.0.0.1" && candidateHost != "::1"
+                    }?.sortedByDescending {
+                        availableFamilies.contains(it.getRealHost().contains(":"))
                     } ?: return@launch
 
                     val host = remoteCandidates[0].getRealHost()
@@ -316,7 +322,7 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                             requestSuccessReceived = true
                         } else if (command.header.type == HeaderType.REQUEST) {
                             candidateResponses++
-                            val xorAddress = StunAttributeValueParser.createXorMappedAddress(command.header.id, host, port, true)
+                            val xorAddress = StunAttributeValueParser.createXorMappedAddress(command.header.id, host, port)
                             val responseAttributes = listOf(
                                 StunAttribute(AttributeType.XOR_MAPPED_ADDRESS, xorAddress)
                             )
@@ -355,7 +361,7 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                             nominateSuccessReceived = true
                         } else if (command.header.type == HeaderType.REQUEST) {
                             candidateResponses++
-                            val xorAddress = StunAttributeValueParser.createXorMappedAddress(command.header.id, host, port, true)
+                            val xorAddress = StunAttributeValueParser.createXorMappedAddress(command.header.id, host, port)
                             val responseAttributes = listOf(
                                 StunAttribute(AttributeType.XOR_MAPPED_ADDRESS, xorAddress)
                             )
@@ -476,7 +482,7 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                     val command = commandsManager.readStun(bytes)
                     if (command.header.type == HeaderType.REQUEST) {
                         val xorAddress = StunAttributeValueParser.createXorMappedAddress(
-                            command.header.id, host, port, true
+                            command.header.id, host, port
                         )
                         commandsManager.writeStun(
                             HeaderType.SUCCESS, command.header.id,

@@ -6,28 +6,19 @@ plugins {
 
 android {
   namespace = "com.pedro.rtmp"
-  compileSdk = 37
+  //noinspection GradleDependency
+  compileSdk = 35
 
   defaultConfig {
     minSdk = 16
     lint.targetSdk = 37
   }
-  buildTypes {
-    release {
-      isMinifyEnabled = false
-    }
-  }
-  compileOptions {
-    sourceCompatibility = JavaVersion.VERSION_17
-    targetCompatibility = JavaVersion.VERSION_17
+  testOptions {
+    unitTests.isReturnDefaultValues = true
   }
   publishing {
     singleVariant("release")
   }
-}
-
-kotlin {
-  jvmToolchain(17)
 }
 
 afterEvaluate {

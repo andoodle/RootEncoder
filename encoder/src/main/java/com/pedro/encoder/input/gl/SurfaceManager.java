@@ -28,7 +28,6 @@ import android.view.Surface;
 
 import androidx.annotation.RequiresApi;
 
-import com.pedro.encoder.BuildConfig;
 import com.pedro.encoder.utils.gl.GlUtil;
 
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -199,7 +198,7 @@ public class SurfaceManager {
       eglDisplay = EGL14.EGL_NO_DISPLAY;
       eglContext = EGL14.EGL_NO_CONTEXT;
       eglSurface = EGL14.EGL_NO_SURFACE;
-    } else if (BuildConfig.DEBUG) {
+    } else if (GlUtil.debugMode) {
       // GPX fork patch: verbose, not error — release() on a never-initialized/already-released
       // manager is a defensive no-op hit on every headless teardown (cold start prepares the
       // pipeline before any surface exists) and was the top E-level line in startup logcat.
