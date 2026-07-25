@@ -1009,25 +1009,43 @@ abstract class StreamBase(
         // change keeps monotonic PTS for the downstream clip pipeline. prepareVideoEncoder() would
         // stop() it anyway; this is what makes that stop non-resetting.
         videoEncoderRecord.stop(false)
-        videoEncoderRecord.type = mimeOf(codec)
-        val prepared = videoEncoderRecord.prepareVideoEncoder(pair.profile, pair.level)
-        if (!prepared) {
+
+        // From here the encoder's MIME no longer matches recordCodecPrepared, so EVERY exit —
+        // including an exception — must leave the claim correct. restart() reaches
+        // MediaCodec.start(), which genuinely throws on this path: it brings up a second hardware
+        // video encoder while the stream encoder and camera are live, and that is at or past the
+        // concurrent-encoder limit on some SoCs.
+        //
+        // Clearing on the way out is the safe direction. Leaving the old codec's name against an
+        // encoder now holding the new one is an OVER-report: a later change back to the old codec
+        // would see a match, take the label-only no-op branch, and record that codec's label over
+        // this codec's bitstream — silently reinstating #267 through the very API added to prevent
+        // it, visible only in a written .ts file.
+        try {
+            videoEncoderRecord.type = mimeOf(codec)
+            val prepared = videoEncoderRecord.prepareVideoEncoder(pair.profile, pair.level)
+            if (!prepared) {
+                recordCodecPrepared = null
+                return false
+            }
+            // A new prepare means a new negotiated format is coming; the old one describes the
+            // previous codec and would otherwise be replayed into a freshly installed record
+            // controller. Cleared on this branch ONLY — clearing on the no-op branch would starve a
+            // rollover's fresh controller of any format at all, since no second
+            // onOutputFormatChanged is coming.
+            lastVideoFormat = null
+            if (mustStartHere) {
+                videoEncoderRecord.restart()
+                glInterface.addMediaCodecRecordSurface(videoEncoderRecord.inputSurface)
+            }
+            recordCodecPrepared = codec
+            // Label LAST, so it is only ever advanced once the bitstream behind it exists.
+            recordController.setVideoCodec(codec)
+            return true
+        } catch (t: Throwable) {
             recordCodecPrepared = null
-            return false
+            throw t
         }
-        // A new prepare means a new negotiated format is coming; the old one describes the previous
-        // codec and would otherwise be replayed into a freshly installed record controller. Cleared
-        // on this branch ONLY — clearing on the no-op branch would starve a rollover's fresh
-        // controller of any format at all, since no second onOutputFormatChanged is coming.
-        lastVideoFormat = null
-        if (mustStartHere) {
-            videoEncoderRecord.restart()
-            glInterface.addMediaCodecRecordSurface(videoEncoderRecord.inputSurface)
-        }
-        recordCodecPrepared = codec
-        // Label LAST, so it is only ever advanced once the bitstream behind it exists.
-        recordController.setVideoCodec(codec)
-        return true
     }
 
 
