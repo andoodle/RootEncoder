@@ -89,6 +89,11 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   // silently stop the H264 encoder requesting it, with C8's one-time capture possibly predating the
   // latch. Re-evaluate the flag's scope (per component, not per process) as part of C8.
   private static volatile boolean maxBFramesKeyRejected = false;
+  // GPX fork patch: what THIS instance actually asked for at its last configure. Recomputing the
+  // static flag at log time would misreport the stream encoder's request if the record encoder
+  // latched a rejection in between — and this log is the evidence trail for whether B-frame
+  // suppression was even attempted, so it has to describe the instance, not the process.
+  private boolean zeroBFramesRequestedForThisCodec = false;
 
   public VideoEncoder(GetVideoData getVideoData) {
     this.getVideoData = getVideoData;
@@ -162,7 +167,13 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
       try {
         configureCodec(encoder, requestZeroBFrames);
       } catch (Exception e) {
-        if (!requestZeroBFrames) throw e;
+        if (!requestZeroBFrames) {
+          // Nothing to retry (pre-Q, or already latched). Release here rather than falling into the
+          // outer catch's stop(), whose codec.stop() throws from the Error state and then nulls the
+          // codec without releasing it.
+          releaseCodecForRetry();
+          throw e;
+        }
         // configure() is the only place a vendor can reject the format, and a rejection moves the
         // codec to the Error state — where configure() itself is illegal, so retrying on the same
         // instance would throw again. The instance has to be torn down and rebuilt, and the async
@@ -180,11 +191,13 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
           releaseCodecForRetry();
           throw retryFailure;
         }
-        // Only NOW is the key demonstrably the cause: without it the same configure succeeds.
-        // Latching on the first throw instead would let a transient failure (resource contention
-        // during a recovery cycle is the common one) permanently suppress the key for the whole
-        // process — silently reinstating the very B-frame exposure this patch exists to close,
-        // somewhere no one would look because G2 is a one-time check.
+        // This is the best available evidence that the key was the cause: without it, the same
+        // configure succeeds. It is not proof — a transient failure on the first attempt followed
+        // by a clean retry latches the flag too, and there is no un-latch. But latching on the
+        // first throw instead would suppress the key for the whole process after ANY configure
+        // failure, silently reinstating the B-frame exposure this patch exists to close, somewhere
+        // no one would look because G2 is a one-time check. A false latch is at least visible: the
+        // negotiated-format log reports zeroBFramesRequested=false.
         maxBFramesKeyRejected = true;
         Log.w(TAG, "KEY_MAX_B_FRAMES rejected by this device; suppressed for the process");
       }
@@ -214,6 +227,7 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
     MediaFormat videoFormat = buildVideoFormat(encoder, requestZeroBFrames);
     setCallback();
     codec.configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+    zeroBFramesRequestedForThisCodec = requestZeroBFrames;
   }
 
   /**
@@ -570,8 +584,7 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
           + " max-bframes=" + optInt(mediaFormat, "max-bframes")
           + " bitrate-mode=" + optInt(mediaFormat, MediaFormat.KEY_BITRATE_MODE)
           + " (requested profile=" + profile + " level=" + level
-          + " zeroBFramesRequested=" + (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
-              && !maxBFramesKeyRejected) + ")");
+          + " zeroBFramesRequested=" + zeroBFramesRequestedForThisCodec + ")");
     } catch (Exception ignored) {
       // Diagnostics must never be able to break an encoder callback.
     }
