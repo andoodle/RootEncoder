@@ -115,11 +115,48 @@ public abstract class BaseEncoder implements EncoderCallback {
 
   protected void setCallback() {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !type.equals(CodecUtil.G711_MIME)) {
+      // GPX fork patch: this method spawns a HandlerThread per call, and every ordinary caller
+      // reaches it via a prepare path that ran stop() first (which quits and joins the thread), so
+      // historically nothing leaked. VideoEncoder's configure-retry (see prepareVideoEncoder) is the
+      // first caller that legitimately calls setCallback twice WITHOUT an intervening stop(), so
+      // retire any thread still held here rather than leaking one per attempt. Idempotent after
+      // stop() — quitting an already-quit HandlerThread is a no-op.
+      releaseCallbackThread();
       handlerThread = new HandlerThread(TAG);
       handlerThread.start();
       handler = new Handler(handlerThread.getLooper());
       createAsyncCallback();
       codec.setCallback(callback, handler);
+    }
+  }
+
+  /**
+   * GPX fork patch: quit and join whatever HandlerThread {@link #setCallback()} last created, if
+   * any. Split out so a caller that must re-register the async callback without going through the
+   * full {@link #stop()} path (VideoEncoder's configure-retry) can still retire the old thread.
+   */
+  protected void releaseCallbackThread() {
+    if (handlerThread == null) return;
+    try {
+      // quitSafely is API 18+; this module's minSdk is lower, and although handlerThread can only
+      // be non-null when setCallback ran (itself API 23+ gated), lint cannot prove that.
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+        handlerThread.quitSafely();
+      } else {
+        handlerThread.quit();
+      }
+      // NEVER join our own thread. In async mode MediaCodec.Callback runs ON handlerThread, and the
+      // codec-crash recovery path (onOutputBufferAvailable -> reloadCodec -> reset ->
+      // prepareVideoEncoder -> setCallback) therefore reaches here executing on the very thread
+      // being joined. It cannot die while blocked on itself, so the join would burn its full
+      // timeout on every codec-crash recovery. The looper is already quit above, so the thread
+      // exits on its own as soon as the callback unwinds.
+      if (Thread.currentThread() != handlerThread) handlerThread.join(500);
+    } catch (Exception ignored) {
+    } finally {
+      handlerThread = null;
+      handler = null;
+      callback = null;
     }
   }
 

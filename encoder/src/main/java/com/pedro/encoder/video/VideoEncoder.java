@@ -75,6 +75,20 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   // GPX fork patch (graft from alexsafe f26cd13abb): allow forcing VBR bitrate mode. Used for the
   // record encoder so VOD recordings use VBR rather than CBR. Toggled via setTryForceVBRBitrateMode.
   private boolean tryForceVBRBitrateMode = false;
+  // GPX fork patch: sticky per-process record that this device's encoder rejected
+  // KEY_MAX_B_FRAMES at configure time, so the retry is paid once rather than on every
+  // reset()/reloadCodec() recovery cycle — which would double codec setup in exactly the path
+  // where recovery latency matters. Static so the record encoder inherits what the stream encoder
+  // already learned. Not persisted: this is a library with no preferences seam, and one failed
+  // configure per process launch on a rejecting device is an acceptable price.
+  //
+  // CAVEAT for whoever raises H264 off Baseline (gpxnative-ai #254 item C8): rejection is a property
+  // of one vendor COMPONENT, but this flag is process-wide. Today that is harmless — H264 requests
+  // Baseline, which forbids B-frames structurally whatever this flag says. Once H264 moves to
+  // Main/High it depends on the key too, and a rejection latched by the HEVC component would
+  // silently stop the H264 encoder requesting it, with C8's one-time capture possibly predating the
+  // latch. Re-evaluate the flag's scope (per component, not per process) as part of C8.
+  private static volatile boolean maxBFramesKeyRejected = false;
 
   public VideoEncoder(GetVideoData getVideoData) {
     this.getVideoData = getVideoData;
@@ -132,68 +146,48 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
         Log.e(TAG, "Valid encoder not found");
         return false;
       }
-      MediaFormat videoFormat;
-      //if you don't use mediacodec rotation you need swap width and height in rotation 90 or 270
-      // for correct encoding resolution
-      String resolution;
-      if ((rotation == 90 || rotation == 270)) {
-        resolution = height + "x" + width;
-        videoFormat = MediaFormat.createVideoFormat(type, height, width);
-      } else {
-        resolution = width + "x" + height;
-        videoFormat = MediaFormat.createVideoFormat(type, width, height);
-      }
-      Log.i(TAG, "Prepare video info: " + this.formatVideoEncoder.name() + ", " + resolution);
-      videoFormat.setInteger(MediaFormat.KEY_COLOR_FORMAT,
-          this.formatVideoEncoder.getFormatCodec());
-      videoFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 0);
-      videoFormat.setInteger(MediaFormat.KEY_BIT_RATE, bitRate);
-      videoFormat.setInteger(MediaFormat.KEY_FRAME_RATE, fps);
-      videoFormat.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval);
-      //Set CBR mode if supported by encoder.
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && CodecUtil.isCBRModeSupported(encoder, type)) {
-        Log.i(TAG, "set bitrate mode CBR");
-        videoFormat.setInteger(MediaFormat.KEY_BITRATE_MODE,
-            MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR);
-      } else {
-        Log.i(TAG, "bitrate mode CBR not supported using default mode");
-      }
-      // GPX fork patch (graft): when requested, override the mode above with VBR (e.g. for the
-      // record encoder). Referenced by StreamBase.setTryForceVBRBitrateMode / prepareVideo.
-      if (tryForceVBRBitrateMode && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-        Log.i(TAG, "set bitrate mode VBR (forced)");
-        videoFormat.setInteger(MediaFormat.KEY_BITRATE_MODE,
-            MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR);
-      }
-      // Rotation by encoder.
-      // Removed because this is ignored by most encoders, producing different results on different devices
-      //  videoFormat.setInteger(MediaFormat.KEY_ROTATION, rotation);
-
-      if (this.profile > 0) {
-        // MediaFormat.KEY_PROFILE, API > 21
-        videoFormat.setInteger("profile", this.profile);
-      }
-      if (this.level > 0) {
-        // MediaFormat.KEY_LEVEL, API > 23
-        videoFormat.setInteger("level", this.level);
-      }
-      // GPX fork patch (graft): ask the encoder to prepend SPS/PPS to every IDR frame so FLV/VOD
-      // recordings stay seekable from any keyframe (pairs with the forced-keyframe-on-start patches).
-      if (type.equals(CodecUtil.H264_MIME) || type.equals(CodecUtil.H265_MIME)) {
+      // GPX fork patch: ask for zero B-frames, with a fallback if the vendor rejects the key.
+      //
+      // Nothing downstream of this encoder can represent a decode order that differs from
+      // presentation order: RTMP hardcodes the FLV composition-time offset to 0, MPEG-TS writes
+      // PES with PTS and no DTS, and RTP has no DTS field at all. A B-frame therefore degrades
+      // timing on every publishing path, and Dolby/Millicast ingest reports them. H264 avoids this
+      // structurally when Baseline is requested, but HEVC has no B-frame-free profile — Main
+      // permits them — so KEY_MAX_B_FRAMES is the only lever that closes H265.
+      //
+      // The key is API 29+. It is also only a REQUEST: vendors may ignore it, so this is not
+      // self-proving and the bitstream still has to be checked.
+      boolean requestZeroBFrames =
+          Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && !maxBFramesKeyRejected;
+      try {
+        configureCodec(encoder, requestZeroBFrames);
+      } catch (Exception e) {
+        if (!requestZeroBFrames) throw e;
+        // configure() is the only place a vendor can reject the format, and a rejection moves the
+        // codec to the Error state — where configure() itself is illegal, so retrying on the same
+        // instance would throw again. The instance has to be torn down and rebuilt, and the async
+        // callback re-registered (an unserviced codec would hang, which is worse than failing).
+        // Without this retry a single unrecognised key would stop the device streaming entirely,
+        // because the caller's catch turns any throw into prepared = false.
+        Log.w(TAG, "configure failed with KEY_MAX_B_FRAMES; retrying without it", e);
+        releaseCodecForRetry();
         try {
-          videoFormat.setInteger("prepend-sps-pps-to-idr-frames", 1);
-        } catch (Exception ignored) { }
+          configureCodec(encoder, false);
+        } catch (Exception retryFailure) {
+          // The retry failed too, so the key was NOT the cause — leave the flag alone so the next
+          // prepare tries it again. Release before rethrowing: the outer catch runs stop(), whose
+          // codec.stop() throws from the Error state and then nulls the codec without releasing it.
+          releaseCodecForRetry();
+          throw retryFailure;
+        }
+        // Only NOW is the key demonstrably the cause: without it the same configure succeeds.
+        // Latching on the first throw instead would let a transient failure (resource contention
+        // during a recovery cycle is the common one) permanently suppress the key for the whole
+        // process — silently reinstating the very B-frame exposure this patch exists to close,
+        // somewhere no one would look because G2 is a one-time check.
+        maxBFramesKeyRejected = true;
+        Log.w(TAG, "KEY_MAX_B_FRAMES rejected by this device; suppressed for the process");
       }
-      // Set BT.709 color metadata so the encoder embeds correct VUI in the SPS NAL unit.
-      // Without this, devices default to smpte170m/bt470bg which ffprobe/players read incorrectly.
-      // KEY_COLOR_STANDARD / KEY_COLOR_TRANSFER / KEY_COLOR_RANGE added in API 24.
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && forceBt709Color) {
-        videoFormat.setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709);  // primaries + matrix = BT.709
-        videoFormat.setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO); // transfer = BT.709 (gamma)
-        videoFormat.setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED);        // TV range (16-235)
-      }
-      setCallback();
-      codec.configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
       running = false;
       if (formatVideoEncoder == FormatVideoEncoder.SURFACE
           && Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
@@ -208,6 +202,103 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
       this.stop();
       return false;
     }
+  }
+
+  /**
+   * GPX fork patch: build the format, register the async callback and configure, as one unit that
+   * can be attempted twice. Deliberately NOT inlined into prepareVideoEncoder — a retry bolted onto
+   * the linear body is how the callback re-registration and the thread teardown get missed.
+   */
+  private void configureCodec(MediaCodecInfo encoder, boolean requestZeroBFrames) throws Exception {
+    if (codec == null) codec = MediaCodec.createByCodecName(encoder.getName());
+    MediaFormat videoFormat = buildVideoFormat(encoder, requestZeroBFrames);
+    setCallback();
+    codec.configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+  }
+
+  /**
+   * GPX fork patch: return the codec to a state where configure() is legal again after a rejected
+   * format. Not {@link #stop()} — that calls codec.stop() first, which throws from the Error state,
+   * and its catch then nulls the codec WITHOUT releasing it.
+   */
+  private void releaseCodecForRetry() {
+    releaseCallbackThread();
+    if (codec != null) {
+      try {
+        codec.release();
+      } catch (Exception ignored) {
+      }
+      codec = null;
+    }
+  }
+
+  private MediaFormat buildVideoFormat(MediaCodecInfo encoder, boolean requestZeroBFrames) {
+    MediaFormat videoFormat;
+    //if you don't use mediacodec rotation you need swap width and height in rotation 90 or 270
+    // for correct encoding resolution
+    String resolution;
+    if ((rotation == 90 || rotation == 270)) {
+      resolution = height + "x" + width;
+      videoFormat = MediaFormat.createVideoFormat(type, height, width);
+    } else {
+      resolution = width + "x" + height;
+      videoFormat = MediaFormat.createVideoFormat(type, width, height);
+    }
+    Log.i(TAG, "Prepare video info: " + this.formatVideoEncoder.name() + ", " + resolution);
+    videoFormat.setInteger(MediaFormat.KEY_COLOR_FORMAT,
+        this.formatVideoEncoder.getFormatCodec());
+    videoFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 0);
+    videoFormat.setInteger(MediaFormat.KEY_BIT_RATE, bitRate);
+    videoFormat.setInteger(MediaFormat.KEY_FRAME_RATE, fps);
+    videoFormat.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval);
+    //Set CBR mode if supported by encoder.
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && CodecUtil.isCBRModeSupported(encoder, type)) {
+      Log.i(TAG, "set bitrate mode CBR");
+      videoFormat.setInteger(MediaFormat.KEY_BITRATE_MODE,
+          MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR);
+    } else {
+      Log.i(TAG, "bitrate mode CBR not supported using default mode");
+    }
+    // GPX fork patch (graft): when requested, override the mode above with VBR (e.g. for the
+    // record encoder). Referenced by StreamBase.setTryForceVBRBitrateMode / prepareVideo.
+    if (tryForceVBRBitrateMode && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+      Log.i(TAG, "set bitrate mode VBR (forced)");
+      videoFormat.setInteger(MediaFormat.KEY_BITRATE_MODE,
+          MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR);
+    }
+    // Rotation by encoder.
+    // Removed because this is ignored by most encoders, producing different results on different devices
+    //  videoFormat.setInteger(MediaFormat.KEY_ROTATION, rotation);
+
+    if (this.profile > 0) {
+      // MediaFormat.KEY_PROFILE, API > 21
+      videoFormat.setInteger("profile", this.profile);
+    }
+    if (this.level > 0) {
+      // MediaFormat.KEY_LEVEL, API > 23
+      videoFormat.setInteger("level", this.level);
+    }
+    // GPX fork patch (graft): ask the encoder to prepend SPS/PPS to every IDR frame so FLV/VOD
+    // recordings stay seekable from any keyframe (pairs with the forced-keyframe-on-start patches).
+    if (type.equals(CodecUtil.H264_MIME) || type.equals(CodecUtil.H265_MIME)) {
+      try {
+        videoFormat.setInteger("prepend-sps-pps-to-idr-frames", 1);
+      } catch (Exception ignored) { }
+    }
+    // Set BT.709 color metadata so the encoder embeds correct VUI in the SPS NAL unit.
+    // Without this, devices default to smpte170m/bt470bg which ffprobe/players read incorrectly.
+    // KEY_COLOR_STANDARD / KEY_COLOR_TRANSFER / KEY_COLOR_RANGE added in API 24.
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && forceBt709Color) {
+      videoFormat.setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709);  // primaries + matrix = BT.709
+      videoFormat.setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO); // transfer = BT.709 (gamma)
+      videoFormat.setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED);        // TV range (16-235)
+    }
+    // GPX fork patch: see prepareVideoEncoder. Zero B-frames, because no publisher in this
+    // library can carry a decode order that differs from presentation order.
+    if (requestZeroBFrames) {
+      videoFormat.setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0);
+    }
+    return videoFormat;
   }
 
   @Override
@@ -454,8 +545,52 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
 
   @Override
   public void formatChanged(@NonNull MediaCodec mediaCodec, @NonNull MediaFormat mediaFormat) {
+    logNegotiatedFormat(mediaFormat);
     getVideoData.onVideoFormat(mediaFormat);
     spsPpsSetted = sendSPSandPPS(mediaFormat);
+  }
+
+  /**
+   * GPX fork patch: log what the encoder actually NEGOTIATED, as opposed to what was requested.
+   *
+   * This is the only place the stream encoder's output format is observable. StreamBase forwards
+   * onVideoFormat to the record controller only when differentRecordResolution is false — which the
+   * app's live path never is — so the stream encoder's negotiated format is otherwise discarded
+   * before it reaches any consumer-visible seam.
+   *
+   * Vendors are not required to populate KEY_PROFILE / KEY_LEVEL in the output format, so absent
+   * values are logged as "-" rather than defaulted: "not reported" and "reported as zero" are very
+   * different facts and must not be conflated. The authoritative check remains the bitstream.
+   */
+  private void logNegotiatedFormat(MediaFormat mediaFormat) {
+    try {
+      Log.i(TAG, "negotiated format: mime=" + optString(mediaFormat, MediaFormat.KEY_MIME)
+          + " profile=" + optInt(mediaFormat, MediaFormat.KEY_PROFILE)
+          + " level=" + optInt(mediaFormat, MediaFormat.KEY_LEVEL)
+          + " max-bframes=" + optInt(mediaFormat, "max-bframes")
+          + " bitrate-mode=" + optInt(mediaFormat, MediaFormat.KEY_BITRATE_MODE)
+          + " (requested profile=" + profile + " level=" + level
+          + " zeroBFramesRequested=" + (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+              && !maxBFramesKeyRejected) + ")");
+    } catch (Exception ignored) {
+      // Diagnostics must never be able to break an encoder callback.
+    }
+  }
+
+  private static String optInt(MediaFormat format, String key) {
+    try {
+      return format.containsKey(key) ? String.valueOf(format.getInteger(key)) : "-";
+    } catch (Exception e) {
+      return "-";
+    }
+  }
+
+  private static String optString(MediaFormat format, String key) {
+    try {
+      return format.containsKey(key) ? String.valueOf(format.getString(key)) : "-";
+    } catch (Exception e) {
+      return "-";
+    }
   }
 
   @Override
