@@ -567,10 +567,13 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   /**
    * GPX fork patch: log what the encoder actually NEGOTIATED, as opposed to what was requested.
    *
-   * This is the only place the stream encoder's output format is observable. StreamBase forwards
-   * onVideoFormat to the record controller only when differentRecordResolution is false — which the
-   * app's live path never is — so the stream encoder's negotiated format is otherwise discarded
-   * before it reaches any consumer-visible seam.
+   * Consumers wanting the stream encoder's negotiated format programmatically should use
+   * StreamBase.setStreamVideoFormatListener / getLastStreamVideoFormat. This log predates that seam
+   * (it was the only observation point when StreamBase still discarded the stream encoder's format
+   * whenever record dimensions were passed) and is kept because it reports two things the seam
+   * structurally cannot: the profile/level as this encoder actually stored them, and
+   * zeroBFramesRequestedForThisCodec, which is private state rather than a MediaFormat key. It also
+   * covers the record encoder, which has no listener seam.
    *
    * Vendors are not required to populate KEY_PROFILE / KEY_LEVEL in the output format, so absent
    * values are logged as "-" rather than defaulted: "not reported" and "reported as zero" are very

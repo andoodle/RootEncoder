@@ -87,6 +87,23 @@ abstract class StreamBase(
   private val fpsListener = FpsListener()
   private var lastVideoFormat: MediaFormat? = null
   private var lastAudioFormat: MediaFormat? = null
+
+  /**
+   * GPX fork patch: the STREAM encoder's negotiated MediaFormat.
+   *
+   * Deliberately separate from [lastVideoFormat], which means "the format of whichever encoder feeds
+   * recording" and is replayed into a newly installed controller by [setRecordController]. Writing
+   * the stream encoder's format into that field when the record encoder is the one recording would
+   * hand a record controller the wrong SPS/PPS for the bitstream it is muxing.
+   *
+   * Volatile: written on the MediaCodec async-callback HandlerThread, read from app threads.
+   */
+  @Volatile
+  private var lastStreamVideoFormat: MediaFormat? = null
+
+  /** GPX fork patch: see [setStreamVideoFormatListener]. Volatile for the same reason as above. */
+  @Volatile
+  private var streamVideoFormatListener: ((MediaFormat) -> Unit)? = null
   var isStreaming = false
     private set
   var isOnPreview = false
@@ -110,6 +127,15 @@ abstract class StreamBase(
    *
    * @param profile codec value from MediaCodecInfo.CodecProfileLevel class
    * @param level codec value from MediaCodecInfo.CodecProfileLevel class
+   * @param recordProfile GPX fork patch: profile for the RECORD encoder, which may run a different
+   * codec than the stream encoder (its MIME is set independently via setVideoRecCodec). The
+   * MediaCodecInfo.CodecProfileLevel constants are codec-namespaced — 1 is AVCProfileBaseline for
+   * H264 but HEVCProfileMain for H265, and 2048 is AVCLevel4 but HEVCHighTierLevel4 — so a single
+   * pair cannot be correct for both encoders whenever the two codecs differ, which for the GPX app
+   * (stream H264 + record H265) is the default rather than an edge case. Defaults to [profile] so
+   * every existing caller keeps today's shared-pair behaviour exactly.
+   * @param recordLevel GPX fork patch: level for the RECORD encoder. See [recordProfile]; defaults
+   * to [level] for the same reason.
    * @param forceRecordVbr GPX fork patch: when the record encoder is prepared at its own resolution
    * (recordWidth/recordHeight set), force it into VBR bitrate mode instead of the device's default
    * (CBR when supported). Independent of the resolution-difference check itself — callers decide
@@ -125,11 +151,15 @@ abstract class StreamBase(
     width: Int, height: Int, bitrate: Int, fps: Int = 30, iFrameInterval: Int = 2,
     rotation: Int = 0, profile: Int = -1, level: Int = -1,
     recordWidth: Int = 0, recordHeight: Int = 0, recordBitrate: Int = bitrate,
-    forceRecordVbr: Boolean = false
+    forceRecordVbr: Boolean = false,
+    recordProfile: Int = profile, recordLevel: Int = level
   ): Boolean {
     if (isStreaming || isRecording || isOnPreview) {
       throw IllegalStateException("Stream, record and preview must be stopped before prepareVideo")
     }
+    // GPX fork patch: a new prepare means a new negotiated format is coming. Drop the old one so
+    // getLastStreamVideoFormat() reports null rather than the previous session's format.
+    lastStreamVideoFormat = null
     differentRecordResolution = false
     if (recordWidth > 0 && recordHeight > 0) {
       if (recordWidth.toDouble() / recordHeight.toDouble() != width.toDouble() / height.toDouble()) {
@@ -153,7 +183,7 @@ abstract class StreamBase(
       if (differentRecordResolution) {
         videoEncoderRecord.setTryForceVBRBitrateMode(forceRecordVbr)
         val result = videoEncoderRecord.prepareVideoEncoder(recordWidth, recordHeight, fps, recordBitrate, rotation,
-          iFrameInterval, FormatVideoEncoder.SURFACE, profile, level)
+          iFrameInterval, FormatVideoEncoder.SURFACE, recordProfile, recordLevel)
         if (!result) return false
       }
       val result = videoEncoder.prepareVideoEncoder(width, height, fps, bitrate, rotation,
@@ -168,11 +198,14 @@ abstract class StreamBase(
         width: Int, height: Int, bitrate: Int, fps: Int = 30, iFrameInterval: Int = 2,
         rotation: Int = 0, profile: Int = -1, level: Int = -1,
         recordWidth: Int = 0, recordHeight: Int = 0, recordBitrate: Int = bitrate,
-        recordCodec: VideoCodec = VideoCodec.H264, forceRecordVbr: Boolean = false
+        recordCodec: VideoCodec = VideoCodec.H264, forceRecordVbr: Boolean = false,
+        recordProfile: Int = profile, recordLevel: Int = level
     ): Boolean {
         if (isStreaming || isRecording || isOnPreview) {
             throw IllegalStateException("Stream, record and preview must be stopped before prepareVideo")
         }
+        // GPX fork patch: see the other overload — clear the stale negotiated stream format.
+        lastStreamVideoFormat = null
         differentRecordResolution = false
         if (recordWidth > 0 && recordHeight > 0) {
             if (recordWidth.toDouble() / recordHeight.toDouble() != width.toDouble() / height.toDouble()) {
@@ -196,7 +229,7 @@ abstract class StreamBase(
             if (differentRecordResolution) {
                 videoEncoderRecord.setTryForceVBRBitrateMode(forceRecordVbr)
                 val result = videoEncoderRecord.prepareVideoEncoder(recordWidth, recordHeight, fps, recordBitrate, rotation,
-                    iFrameInterval, FormatVideoEncoder.SURFACE, profile, level)
+                    iFrameInterval, FormatVideoEncoder.SURFACE, recordProfile, recordLevel)
                 if (!result) return false
             }
             val result = videoEncoder.prepareVideoEncoder(width, height, fps, bitrate, rotation,
@@ -593,6 +626,34 @@ abstract class StreamBase(
   }
 
   /**
+   * GPX fork patch: observe the STREAM encoder's negotiated MediaFormat.
+   *
+   * Until this existed there was no way to see it. [setRecordController] only ever surfaces the
+   * format of whichever encoder feeds recording, and when record dimensions are passed — which the
+   * GPX app always does — that is the RECORD encoder. The stream encoder's own agreed format was
+   * dropped in onVideoFormat and never reached a consumer.
+   *
+   * Register BEFORE prepareVideo. The encoder's callback thread is created during prepare, so
+   * registering first is what publishes the listener to it. [listener] is invoked ON that callback
+   * thread; keep it short and non-blocking. It is called inside a catch-and-log, so a throw cannot
+   * kill the encoder callback — but it also cannot be retried, so do not rely on it for anything
+   * load-bearing.
+   *
+   * Pass null to clear. Registering does NOT replay the last format; a late registrant should read
+   * [getLastStreamVideoFormat] instead.
+   */
+  fun setStreamVideoFormatListener(listener: ((MediaFormat) -> Unit)?) {
+    streamVideoFormatListener = listener
+  }
+
+  /**
+   * GPX fork patch: the STREAM encoder's most recently negotiated MediaFormat, or null if it has not
+   * produced one since the last prepareVideo. Cleared on prepare so a stale format from a previous
+   * configuration is never mistaken for the current one.
+   */
+  fun getLastStreamVideoFormat(): MediaFormat? = lastStreamVideoFormat
+
+  /**
    * return surface texture that can be used to render and encode custom data. Return null if video not prepared.
    * start and stop rendering must be managed by the user.
    */
@@ -727,6 +788,22 @@ abstract class StreamBase(
     }
 
     override fun onVideoFormat(mediaFormat: MediaFormat) {
+      // GPX fork patch: surface the STREAM encoder's negotiated format unconditionally. The record
+      // routing below is gated on !differentRecordResolution — which the GPX app's live path never
+      // is, since it always passes record dimensions — so without this the stream encoder's agreed
+      // format reached no consumer at all.
+      lastStreamVideoFormat = mediaFormat
+      try {
+        streamVideoFormatListener?.invoke(mediaFormat)
+      } catch (e: Exception) {
+        // This runs on the MediaCodec callback HandlerThread, and onOutputFormatChanged is the one
+        // Callback method BaseEncoder does NOT wrap (onInput/onOutputBufferAvailable both catch into
+        // reloadCodec). An exception from consumer code would propagate uncaught and kill the
+        // process mid-stream. Same rule as VideoEncoder.logNegotiatedFormat: a diagnostic seam must
+        // never be able to break an encoder callback. Not caught: Error — an unsurvivable JVM state
+        // should not be papered over into a silently wedged pipeline.
+        Log.e("StreamBase", "streamVideoFormatListener threw; ignoring", e)
+      }
       if (!differentRecordResolution) {
         lastVideoFormat = mediaFormat
         recordController.setVideoFormat(mediaFormat)
