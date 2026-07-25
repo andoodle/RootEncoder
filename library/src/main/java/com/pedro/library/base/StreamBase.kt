@@ -104,6 +104,52 @@ abstract class StreamBase(
   /** GPX fork patch: see [setStreamVideoFormatListener]. Volatile for the same reason as above. */
   @Volatile
   private var streamVideoFormatListener: ((MediaFormat) -> Unit)? = null
+
+  /**
+   * GPX fork patch: the codec the RECORD encoder was last successfully prepared with, as observed
+   * here. Null means "not known to be prepared with anything".
+   *
+   * A fact, never an intention. [setVideoRecCodec] advances `videoEncoderRecord.type` without
+   * preparing anything, and deliberately does NOT touch this — because it does not change what the
+   * encoder *is*, which is all this field means.
+   *
+   * Only a site that applies a codec TOGETHER WITH a profile/level derived for that codec may set
+   * it: [prepareVideo]'s record branch and [applyVideoRecCodec]. Every other site that prepares the
+   * record encoder is a REPLAY ([prepareEncoders], [resetVideoEncoder]) — it reuses whatever type
+   * and stored pair are on the encoder, so it can move the codec without moving the pair, and may
+   * only leave-or-clear. A replay that silently set this would let an encoder running H265 with
+   * H264-namespace profile/level be treated as correctly configured, reinstating exactly the
+   * cross-namespace bug 2.7.5-gpx23 was cut to fix.
+   *
+   * Not sufficient on its own: it can outlive the encoder it describes, since stop() clears
+   * `prepared` without touching this. Every consumer must also check
+   * `videoEncoderRecord.isPrepared()`.
+   *
+   * Volatile: written on the configure thread, read and written on the app's recording-driver
+   * thread.
+   */
+  @Volatile
+  private var recordCodecPrepared: VideoCodec? = null
+
+  /** GPX fork patch: the MIME the record encoder currently holds, as a codec. */
+  private fun recordEncoderCodec(): VideoCodec? = when (videoEncoderRecord.type) {
+    CodecUtil.H264_MIME -> VideoCodec.H264
+    CodecUtil.H265_MIME -> VideoCodec.H265
+    CodecUtil.AV1_MIME -> VideoCodec.AV1
+    else -> null
+  }
+
+  /**
+   * GPX fork patch: a replay just re-prepared the record encoder from its stored fields. Keep
+   * [recordCodecPrepared] only if the replayed MIME still matches it; otherwise the encoder moved to
+   * a codec whose profile/level were never derived for it, so drop the claim and force the next
+   * caller to re-prepare properly. Never sets — see [recordCodecPrepared].
+   */
+  private fun reconcileRecordCodecAfterReplay(replaySucceeded: Boolean) {
+    if (!replaySucceeded || recordEncoderCodec() != recordCodecPrepared) {
+      recordCodecPrepared = null
+    }
+  }
   var isStreaming = false
     private set
   var isOnPreview = false
@@ -167,6 +213,11 @@ abstract class StreamBase(
       }
       differentRecordResolution = true
     }
+    // GPX fork patch: a call carrying no record dimensions means recording will tap the STREAM
+    // encoder, so any claim about a record encoder's codec is void from here on — cleared regardless
+    // of how this call ends. (A claim left standing here would let a caller label a recording with
+    // the VOD codec while the stream encoder produces the bitstream.)
+    if (!differentRecordResolution) recordCodecPrepared = null
     val videoResult = videoSource.init(max(width, recordWidth), max(height, recordHeight), fps, rotation)
     if (videoResult) {
       if (differentRecordResolution) {
@@ -184,6 +235,10 @@ abstract class StreamBase(
         videoEncoderRecord.setTryForceVBRBitrateMode(forceRecordVbr)
         val result = videoEncoderRecord.prepareVideoEncoder(recordWidth, recordHeight, fps, recordBitrate, rotation,
           iFrameInterval, FormatVideoEncoder.SURFACE, recordProfile, recordLevel)
+        // GPX fork patch: this site applies a codec together with a profile/level derived for it, so
+        // it may set the claim. Failing BEFORE here (videoSource.init false, or the aspect throw)
+        // never touched the record encoder and so must leave it untouched.
+        recordCodecPrepared = if (result) recordEncoderCodec() else null
         if (!result) return false
       }
       val result = videoEncoder.prepareVideoEncoder(width, height, fps, bitrate, rotation,
@@ -213,6 +268,8 @@ abstract class StreamBase(
             }
             differentRecordResolution = true
         }
+        // GPX fork patch: see the other overload.
+        if (!differentRecordResolution) recordCodecPrepared = null
         val videoResult = videoSource.init(max(width, recordWidth), max(height, recordHeight), fps, rotation)
         if (videoResult) {
             if (differentRecordResolution) {
@@ -230,6 +287,8 @@ abstract class StreamBase(
                 videoEncoderRecord.setTryForceVBRBitrateMode(forceRecordVbr)
                 val result = videoEncoderRecord.prepareVideoEncoder(recordWidth, recordHeight, fps, recordBitrate, rotation,
                     iFrameInterval, FormatVideoEncoder.SURFACE, recordProfile, recordLevel)
+                // GPX fork patch: see the other overload.
+                recordCodecPrepared = if (result) recordEncoderCodec() else null
                 if (!result) return false
             }
             val result = videoEncoder.prepareVideoEncoder(width, height, fps, bitrate, rotation,
@@ -739,6 +798,9 @@ abstract class StreamBase(
     if (differentRecordResolution) {
       glInterface.removeMediaCodecRecordSurface()
       val result = videoEncoderRecord.reset()
+      // GPX fork patch: reset() is a REPLAY (stop + no-arg prepare + restart) — same reasoning as
+      // prepareEncoders(). Leave-or-clear only, never set.
+      reconcileRecordCodecAfterReplay(result)
       if (!result) return false
       glInterface.addMediaCodecRecordSurface(videoEncoderRecord.inputSurface)
     }
@@ -759,6 +821,10 @@ abstract class StreamBase(
   private fun prepareEncoders(): Boolean {
     if (differentRecordResolution) {
       val result = videoEncoderRecord.prepareVideoEncoder()
+      // GPX fork patch: a REPLAY — it re-sends the stored profile/level while reading the current
+      // type, so if setVideoRecCodec moved the MIME since the last real prepare, the encoder now
+      // runs a codec whose profile/level were never derived for it. Leave-or-clear only.
+      reconcileRecordCodecAfterReplay(result)
       if (!result) return false
     }
     return videoEncoder.prepareVideoEncoder() && audioEncoder.prepareAudioEncoder()
@@ -839,16 +905,116 @@ abstract class StreamBase(
         if (forVideoEncoderRecord) videoEncoderRecord.setTryForceVBRBitrateMode(true)
     }
 
-    fun setVideoRecCodec(codec: VideoCodec) {
+    /**
+     * GPX fork patch: a codec-namespaced profile/level pair, kept together because the
+     * MediaCodecInfo.CodecProfileLevel constants mean different things per codec and a pair that
+     * travels apart from its codec is how the cross-namespace bug happens.
+     */
+    data class ProfileLevel(val profile: Int, val level: Int)
 
+    private fun mimeOf(codec: VideoCodec): String = when (codec) {
+        VideoCodec.H264 -> CodecUtil.H264_MIME
+        VideoCodec.H265 -> CodecUtil.H265_MIME
+        VideoCodec.AV1 -> CodecUtil.AV1_MIME
+    }
+
+    /**
+     * GPX fork patch: declare the record codec BEFORE prepareVideo — pre-prepare intent only.
+     *
+     * Sets the muxer label and the record encoder's MIME so the prepareVideo that follows builds the
+     * encoder on that codec with a matching profile/level. It never re-prepares, which is what makes
+     * it correct even when the record encoder is already prepared from a previous session (stopStream
+     * and stopRecord both re-prepare it via prepareEncoders()).
+     *
+     * Deliberately does NOT touch recordCodecPrepared: it changes intent, not what the encoder is.
+     * If the following prepareVideo fails, the claim therefore still truthfully names the OLD codec,
+     * and the next applyVideoRecCodec sees a mismatch instead of a stale match.
+     *
+     * To change the record codec on an ALREADY-PREPARED encoder, use [applyVideoRecCodec] — this
+     * method would leave the muxer labelled with a codec the encoder is not producing.
+     */
+    fun setVideoRecCodec(codec: VideoCodec) {
         recordController.setVideoCodec(codec)
-        val type = when (codec) {
-            VideoCodec.H264 -> CodecUtil.H264_MIME
-            VideoCodec.H265 -> CodecUtil.H265_MIME
-            VideoCodec.AV1 -> CodecUtil.AV1_MIME
+        videoEncoderRecord.type = mimeOf(codec)
+    }
+
+    /**
+     * GPX fork patch: true if [applyVideoRecCodec] would have to re-prepare the record encoder.
+     *
+     * Lets a caller decide whether it needs to take its own locks, or derive a profile/level, before
+     * calling. Same predicate applyVideoRecCodec uses internally, exposed as one method so the two
+     * decisions cannot diverge.
+     */
+    fun recordCodecNeedsReprepare(codec: VideoCodec): Boolean {
+        if (!differentRecordResolution) return false
+        return recordCodecPrepared != codec || !videoEncoderRecord.isPrepared()
+    }
+
+    /**
+     * GPX fork patch: apply the record codec COHERENTLY to an already-prepared encoder.
+     *
+     * Either the record encoder's MIME, its profile/level, and the muxer's label all describe
+     * [codec] when this returns true, or nothing is claimed and it returns false. The old
+     * setVideoRecCodec did half of this silently on a prepared encoder, which is how a `.ts` could
+     * end up declaring a codec its bitstream did not match (gpxnative-ai#267).
+     *
+     * @param pair profile/level derived for [codec]. May be null ONLY when the caller believes this
+     *   is a no-op; if it turns out a re-prepare is needed, this fails closed rather than preparing
+     *   with a sentinel.
+     * @return true if the encoder and the label now agree on [codec]. False means DO NOT start
+     *   recording — the label was left describing the last bitstream that actually existed.
+     */
+    fun applyVideoRecCodec(codec: VideoCodec, pair: ProfileLevel?): Boolean {
+        if (isRecording) {
+            throw IllegalStateException("stopRecord before changing the record codec")
         }
-//        videoEncoderRecord.setTryForceVBRBitrateMode(true)
-        videoEncoderRecord.type = type
+        // Recording taps the STREAM encoder when no record encoder is prepared, so the record codec
+        // is not this method's to set. Keyed on differentRecordResolution, not isPrepared(): that
+        // flag alone governs whether the record encoder is started, attached and read.
+        if (!differentRecordResolution) return false
+
+        if (!recordCodecNeedsReprepare(codec)) {
+            recordController.setVideoCodec(codec)
+            return true
+        }
+        if (pair == null) {
+            // The caller expected a no-op and did not derive a pair (prepared can flip on the codec
+            // callback thread, which takes no lock). Preparing with a sentinel would hand the encoder
+            // a profile/level in no particular namespace.
+            recordCodecPrepared = null
+            return false
+        }
+
+        val wasRunning = videoEncoderRecord.isRunning
+        // Start and attach here exactly when startRecord's own `if (!isStreaming) startSources()`
+        // will not: while streaming it is skipped, so this is the only thing that can, and that is
+        // true even when the encoder is not currently running (a previously-failed apply).
+        val mustStartHere = wasRunning || isStreaming
+
+        glInterface.removeMediaCodecRecordSurface()
+        // stop(false), not stop(): preserves the timestamp baseline so a recording spanning a codec
+        // change keeps monotonic PTS for the downstream clip pipeline. prepareVideoEncoder() would
+        // stop() it anyway; this is what makes that stop non-resetting.
+        videoEncoderRecord.stop(false)
+        videoEncoderRecord.type = mimeOf(codec)
+        val prepared = videoEncoderRecord.prepareVideoEncoder(pair.profile, pair.level)
+        if (!prepared) {
+            recordCodecPrepared = null
+            return false
+        }
+        // A new prepare means a new negotiated format is coming; the old one describes the previous
+        // codec and would otherwise be replayed into a freshly installed record controller. Cleared
+        // on this branch ONLY — clearing on the no-op branch would starve a rollover's fresh
+        // controller of any format at all, since no second onOutputFormatChanged is coming.
+        lastVideoFormat = null
+        if (mustStartHere) {
+            videoEncoderRecord.restart()
+            glInterface.addMediaCodecRecordSurface(videoEncoderRecord.inputSurface)
+        }
+        recordCodecPrepared = codec
+        // Label LAST, so it is only ever advanced once the bitstream behind it exists.
+        recordController.setVideoCodec(codec)
+        return true
     }
 
 

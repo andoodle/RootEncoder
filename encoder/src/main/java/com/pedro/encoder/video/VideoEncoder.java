@@ -367,6 +367,23 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
         formatVideoEncoder, profile, level);
   }
 
+  /**
+   * GPX fork patch: re-prepare with the stored geometry but a NEW profile/level.
+   *
+   * The no-arg replay above re-sends the stored profile/level while chooseEncoder() reads the
+   * current {@code type} field — so a caller that changed the MIME gets an encoder on the new codec
+   * carrying the old codec's namespace profile/level. The MediaCodecInfo.CodecProfileLevel
+   * constants are codec-namespaced (1 is AVCProfileBaseline for H264 but HEVCProfileMain for H265),
+   * so that pairing is meaningless at best and stamped into the SPS at worst.
+   *
+   * This overload exists so a codec change and its profile/level always move together. Set the MIME
+   * via setType() immediately before calling it.
+   */
+  public boolean prepareVideoEncoder(int profile, int level) {
+    return prepareVideoEncoder(width, height, fps, bitRate, rotation, iFrameInterval,
+        formatVideoEncoder, profile, level);
+  }
+
   @RequiresApi(api = Build.VERSION_CODES.KITKAT)
   public void setVideoBitrateOnFly(int bitrate) {
     if (isRunning()) {

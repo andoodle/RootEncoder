@@ -330,6 +330,21 @@ public abstract class BaseEncoder implements EncoderCallback {
     return running;
   }
 
+  /**
+   * GPX fork patch: true when a codec has been successfully configured and not since stopped.
+   *
+   * Distinct from {@link #isRunning()}: an encoder can be prepared but not started (every
+   * cold-start re-prepare), and {@link #stop()} clears this without the caller preparing again.
+   *
+   * Needed because a caller deciding whether a codec change is a no-op cannot rely on the stored
+   * type/profile/level fields — those are written speculatively before configure() and survive a
+   * failure, so they describe what was requested, not what exists. See StreamBase's
+   * recordCodecPrepared.
+   */
+  public boolean isPrepared() {
+    return prepared;
+  }
+
   @Override
   public void inputAvailable(@NonNull MediaCodec mediaCodec, int inBufferIndex)
       throws IllegalStateException {
