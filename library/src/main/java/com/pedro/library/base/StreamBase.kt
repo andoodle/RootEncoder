@@ -125,6 +125,15 @@ abstract class StreamBase(
    * `prepared` without touching this. Every consumer must also check
    * `videoEncoderRecord.isPrepared()`.
    *
+   * One replay is NOT hooked: VideoEncoder's own reloadCodec -> reset(), which runs inside the
+   * encoder on the codec-callback thread and is invisible here. It replays the current `type`, so if
+   * a caller had mutated the MIME while the encoder was running, this field would keep naming the
+   * OLD codec after the encoder moved — an over-report, not the safe direction. That combination is
+   * unreachable through the intended discipline ([setVideoRecCodec] is a pre-prepare call, and
+   * prepareVideo requires stream, record and preview stopped), so it is a fork-misuse hazard rather
+   * than a live one; changing the record MIME on a running encoder via setVideoRecCodec is exactly
+   * what [applyVideoRecCodec] exists to replace.
+   *
    * Volatile: written on the configure thread, read and written on the app's recording-driver
    * thread.
    */
@@ -941,9 +950,13 @@ abstract class StreamBase(
     /**
      * GPX fork patch: true if [applyVideoRecCodec] would have to re-prepare the record encoder.
      *
-     * Lets a caller decide whether it needs to take its own locks, or derive a profile/level, before
-     * calling. Same predicate applyVideoRecCodec uses internally, exposed as one method so the two
-     * decisions cannot diverge.
+     * Lets a caller decide whether it needs to derive a profile/level before calling. Same predicate
+     * applyVideoRecCodec uses internally, exposed as one method so the two decisions cannot diverge.
+     *
+     * NOTE the two distinct meanings of false: "already prepared with this codec, so the apply is a
+     * label-only no-op", and "there is no record encoder at all", where the apply will refuse and
+     * return false. A caller using this to answer "is the record encoder already on this codec?"
+     * must therefore treat the apply's own false as authoritative rather than assuming success.
      */
     fun recordCodecNeedsReprepare(codec: VideoCodec): Boolean {
         if (!differentRecordResolution) return false

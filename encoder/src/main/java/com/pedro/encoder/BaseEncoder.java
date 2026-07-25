@@ -62,7 +62,11 @@ public abstract class BaseEncoder implements EncoderCallback {
   private MediaCodec.Callback callback;
   private volatile long oldTimeStamp = 0L;
   protected boolean shouldReset = true;
-  protected boolean prepared = false;
+  // GPX fork patch: volatile because isPrepared() is read from app threads (the record-codec
+  // apply's fail-closed check) while this is written on the codec-callback thread by the
+  // reloadCodec -> reset() recovery path. A stale true there would wave through an apply that
+  // believes nothing needs re-preparing, defeating the check it exists for.
+  protected volatile boolean prepared = false;
   private Handler handler;
   private CodecErrorCallback encoderErrorCallback;
   protected String type;
