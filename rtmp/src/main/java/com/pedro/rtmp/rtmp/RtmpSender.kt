@@ -53,20 +53,31 @@ class RtmpSender(
   var socket: RtmpSocket? = null
 
   override fun setVideoInfo(sps: ByteBuffer, pps: ByteBuffer?, vps: ByteBuffer?) {
-    videoPacket = when (commandsManager.videoCodec) {
+    // This runs on the MediaCodec async callback thread, via VideoEncoder.formatChanged ->
+    // sendSPSandPPS -> onVideoInfo, rather than on app code, so a throw here ends the process and no
+    // app-side catch can intervene. An encoder reconfigure that is still settling can deliver an
+    // incomplete parameter set. Drop it and keep the previous videoPacket, so a later complete
+    // formatChanged supplies a full set.
+    when (commandsManager.videoCodec) {
       VideoCodec.H265 -> {
-        if (vps == null || pps == null) throw IllegalArgumentException("pps or vps can't be null with h265")
-        H265Packet().apply { sendVideoInfo(sps, pps, vps) }
+        if (vps == null || pps == null) {
+          Log.e(TAG, "setVideoInfo: dropping incomplete h265 parameter set (pps=${pps != null} vps=${vps != null})")
+          return
+        }
+        videoPacket = H265Packet().apply { sendVideoInfo(sps, pps, vps) }
       }
       VideoCodec.AV1 -> {
-        Av1Packet().apply { sendVideoInfo(sps) }
+        videoPacket = Av1Packet().apply { sendVideoInfo(sps) }
       }
       VideoCodec.H264 -> {
-        if (pps == null) throw IllegalArgumentException("pps can't be null with h264")
-        H264Packet().apply { sendVideoInfo(sps, pps) }
+        if (pps == null) {
+          Log.e(TAG, "setVideoInfo: dropping incomplete h264 parameter set (pps=false)")
+          return
+        }
+        videoPacket = H264Packet().apply { sendVideoInfo(sps, pps) }
       }
-      VideoCodec.VP8 -> Vp8Packet()
-      VideoCodec.VP9 -> Vp9Packet().apply { sendVideoInfo(sps) }
+      VideoCodec.VP8 -> videoPacket = Vp8Packet()
+      VideoCodec.VP9 -> videoPacket = Vp9Packet().apply { sendVideoInfo(sps) }
     }
   }
 
