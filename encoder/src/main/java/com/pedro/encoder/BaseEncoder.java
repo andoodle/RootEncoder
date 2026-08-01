@@ -53,12 +53,21 @@ public abstract class BaseEncoder implements EncoderCallback {
   protected MediaCodec codec;
   protected volatile long presentTimeUs;
   protected volatile boolean running = false;
+  // Whether codec.start() has run since the last stop. Gates the flush on the stop path.
+  private volatile boolean codecStarted = false;
   protected boolean isBufferMode = true;
+  // When true the timestamp baseline survives a stop/start cycle, so output PTS stays monotonic
+  // across a restart instead of rebasing to zero. See forceContinuousTs(). Subclasses keep their
+  // own rebase reference (firstTimestamp / tsBuffer).
+  protected volatile boolean forceContinuousTs = false;
   protected CodecUtil.CodecType codecType = CodecUtil.CodecType.FIRST_COMPATIBLE_FOUND;
   private MediaCodec.Callback callback;
   private volatile long oldTimeStamp = 0L;
   protected boolean shouldReset = true;
-  protected boolean prepared = false;
+  // Volatile because isPrepared() is read from app threads while this is written on the
+  // codec-callback thread by the reloadCodec -> reset() recovery path. A stale true reading there
+  // would wave through a caller that concluded nothing needs re-preparing.
+  protected volatile boolean prepared = false;
   private Handler handler;
   private CodecErrorCallback encoderErrorCallback;
   public Codec type;
@@ -81,7 +90,9 @@ public abstract class BaseEncoder implements EncoderCallback {
 
   public void start(long startTs) {
     if (!prepared) throw new IllegalStateException(TAG + " not prepared yet. You must call prepare method before start it");
-    presentTimeUs = startTs;
+    // Continuous mode keeps the existing baseline so PTS carries on across a restart. Otherwise
+    // each start rebases to the supplied timestamp.
+    if (!forceContinuousTs || presentTimeUs == 0) presentTimeUs = startTs;
     start(true);
     initCodec();
   }
@@ -90,8 +101,23 @@ public abstract class BaseEncoder implements EncoderCallback {
     start(TimeUtils.getCurrentTimeMicro());
   }
 
+  /**
+   * Keep the timestamp baseline across stop/start cycles so output PTS stays monotonic across a
+   * restart, such as a reconnect, instead of rebasing to zero. An HLS packager downstream reads a
+   * rebase as a backward timestamp jump and emits a discontinuity. Default false.
+   */
+  public void forceContinuousTs(boolean force) {
+    this.forceContinuousTs = force;
+  }
+
   protected void setCallback() {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && type != AudioCodec.G711) {
+      // This method creates a HandlerThread per call. Every caller that reaches it through a
+      // prepare path ran stop() first, which quits and joins the previous thread. VideoEncoder's
+      // configure-retry calls setCallback twice with no intervening stop(), so retire any thread
+      // still held rather than leaving one per attempt. Idempotent after stop(): quitting an
+      // already-quit HandlerThread does nothing.
+      releaseCallbackThread();
       handlerThread = new HandlerThread(TAG);
       handlerThread.start();
       handler = new Handler(handlerThread.getLooper());
@@ -100,9 +126,41 @@ public abstract class BaseEncoder implements EncoderCallback {
     }
   }
 
+  /**
+   * Quit and join whatever HandlerThread {@link #setCallback()} last created, if any. Split out so
+   * a caller that must re-register the async callback without going through the full {@link #stop()}
+   * path can still retire the old thread.
+   */
+  protected void releaseCallbackThread() {
+    if (handlerThread == null) return;
+    try {
+      // quitSafely is API 18+. handlerThread can only be non-null when setCallback ran, which is
+      // itself gated at API 23, but lint cannot prove that.
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+        handlerThread.quitSafely();
+      } else {
+        handlerThread.quit();
+      }
+      // Never join this thread from itself. In async mode MediaCodec.Callback runs on handlerThread,
+      // so the codec-crash recovery path (onOutputBufferAvailable -> reloadCodec -> reset ->
+      // prepareVideoEncoder -> setCallback) arrives here already executing on the thread being
+      // joined; it cannot exit while blocked on itself, so the join would burn its full timeout on
+      // every recovery. The looper is quit above, so the thread exits once the callback unwinds.
+      if (Thread.currentThread() != handlerThread) handlerThread.join(500);
+    } catch (Exception ignored) {
+    } finally {
+      handlerThread = null;
+      handler = null;
+      callback = null;
+    }
+  }
+
   private void initCodec() {
     running = true;
-    if (type != AudioCodec.G711) codec.start();
+    if (type != AudioCodec.G711) {
+      codec.start();
+      codecStarted = true;
+    }
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || type == AudioCodec.G711) {
       executorService = Executors.newSingleThreadExecutor();
       executorService.submit(() -> {
@@ -158,7 +216,7 @@ public abstract class BaseEncoder implements EncoderCallback {
   }
 
   public void stop(boolean resetTs) {
-    if (resetTs) {
+    if (resetTs && !forceContinuousTs) {
       presentTimeUs = 0;
     }
     running = false;
@@ -171,11 +229,16 @@ public abstract class BaseEncoder implements EncoderCallback {
         handlerThread.getLooper().quit();
       }
       handlerThread.quit();
-      if (codec != null) {
+      // Only flush a codec that reached Executing. Flushing a codec that is merely Configured --
+      // prepared but never started, which is every cold-start re-prepare -- makes MediaCodec log
+      // "flush() is valid only at Executing states" natively before throwing the
+      // IllegalStateException swallowed here.
+      if (codec != null && codecStarted) {
         try {
           codec.flush();
         } catch (IllegalStateException ignored) { }
       }
+      codecStarted = false;
       //wait for thread to die for 500ms.
       try {
         handlerThread.getLooper().getThread().join(500);
@@ -260,6 +323,20 @@ public abstract class BaseEncoder implements EncoderCallback {
 
   public boolean isRunning() {
     return running;
+  }
+
+  /**
+   * True when a codec has been configured successfully and not stopped since.
+   *
+   * Distinct from {@link #isRunning()}: an encoder can be prepared but not started, which is every
+   * cold-start re-prepare, and {@link #stop()} clears this without the caller preparing again.
+   *
+   * A caller deciding whether a codec change is a no-op cannot read the stored type, profile and
+   * level fields instead, because those are written before configure() and survive its failure, so
+   * they describe what was requested rather than what exists.
+   */
+  public boolean isPrepared() {
+    return prepared;
   }
 
   @Override
