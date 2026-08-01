@@ -199,7 +199,10 @@ public class SurfaceManager {
       eglContext = EGL14.EGL_NO_CONTEXT;
       eglSurface = EGL14.EGL_NO_SURFACE;
     } else if (GlUtil.debugMode) {
-      Log.e(TAG, "GL already released");
+      // Verbose, not error: release() on a manager that was never initialized, or already released,
+      // is a defensive no-op that a headless teardown hits every time, because a cold start prepares
+      // the pipeline before any surface exists.
+      Log.v(TAG, "GL already released");
     }
     isReady.set(false);
   }

@@ -46,7 +46,9 @@ public class ImageStreamObject extends StreamObjectBase {
   public void load(Bitmap imageBitmap) {
     this.imageBitmap = imageBitmap;
     numFrames = 1;
-    Log.i(TAG, "finish load image");
+    // Verbose: load() runs per frame when an overlay bitmap is refreshed, so at info level this one
+    // line dominates logcat during streaming.
+    Log.v(TAG, "finish load image");
   }
 
   @Override
