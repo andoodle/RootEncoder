@@ -185,9 +185,29 @@ abstract class StreamBase(
   fun startStream(endPoint: String) {
     if (isStreaming) throw IllegalStateException("Stream already started, stopStream before startStream again")
     isStreaming = true
-    startStreamImp(endPoint)
-    if (!isRecording) startSources()
-    else requestKeyframe()
+    // Keep the flag and the transport consistent if source startup fails.
+    var transportStarted = false
+    try {
+      startStreamImp(endPoint)
+      transportStarted = true
+      // Unconditional: startSources() is idempotent on its own state, so this no longer has to infer
+      // "are the sources up?" from isRecording, a flag that answers a different question and could
+      // be false while they were running.
+      startSources()
+      // Unconditional keyframe so a viewer joining at connect gets a decodable picture immediately
+      // rather than waiting for the next one in the GOP.
+      requestKeyframe()
+    } catch (e: RuntimeException) {
+      isStreaming = false
+      if (transportStarted) {
+        try {
+          stopStreamImp()
+        } catch (cleanup: RuntimeException) {
+          e.addSuppressed(cleanup)
+        }
+      }
+      throw e
+    }
   }
 
   /**
@@ -269,7 +289,21 @@ abstract class StreamBase(
       videoEncoderRecord.requestKeyframe()
     }
     recordController.startRecord(path, listener, usedTracks)
-    if (!isStreaming) startSources()
+    // Keep recording state consistent if source startup fails. Unconditional for the same reason as
+    // startStream: startSources() owns its own idempotency and stops whatever it started before
+    // rethrowing, so this catch does not have to.
+    try {
+      startSources()
+      // Unconditional keyframe so the file is decodable and seekable from its first frame.
+      requestKeyframe()
+    } catch (e: RuntimeException) {
+      try {
+        recordController.stopRecord()
+      } catch (cleanup: RuntimeException) {
+        e.addSuppressed(cleanup)
+      }
+      throw e
+    }
   }
 
   /**
@@ -344,11 +378,14 @@ abstract class StreamBase(
   fun startPreview(surface: Surface, width: Int, height: Int) {
     if (!surface.isValid) throw IllegalArgumentException("Make sure the Surface is valid")
     if (isOnPreview) throw IllegalStateException("Preview already started, stopPreview before startPreview again")
-    isOnPreview = true
+    // isOnPreview flips only once the sources actually started. stopSources() reads it to decide
+    // whether to stop the video source, so setting it first meant a failed start left the flag true
+    // and the source unstoppable.
     if (!glInterface.isRunning) glInterface.start()
     if (!videoSource.isRunning()) {
       videoSource.start(glInterface.surfaceTexture)
     }
+    isOnPreview = true
     glInterface.attachPreview(surface)
     glInterface.setPreviewResolution(width, height)
   }
@@ -507,21 +544,96 @@ abstract class StreamBase(
 
   protected fun getVideoFps() = videoEncoder.fps
 
-  private fun startSources() {
+  /**
+   * Start the camera and GL half of [startSources] without connecting or starting the encoders, so a
+   * caller can warm a released camera before [startStream] and the outbound connect does not begin
+   * on a cold camera. It reuses the same guards as [startSources], so the later real [startSources]
+   * no-ops on the camera and GL lines and still starts audio and the encoders.
+   *
+   * Does not set [isOnPreview], so it cannot stop a real preview surface attaching later. Does not
+   * wait for the capture session to be able to produce frames, only for the camera device to open;
+   * a caller must still wait for frame readiness before connecting.
+   *
+   * No-op while streaming or on preview.
+   */
+  fun warmSources() {
+    if (isStreaming || isOnPreview) return
     if (!glInterface.isRunning) glInterface.start()
     if (!videoSource.isRunning()) {
       videoSource.start(glInterface.surfaceTexture)
     }
-    audioSource.start(getMicrophoneData)
-    val startTs = TimeUtils.getCurrentTimeMicro()
-    videoEncoder.start(startTs)
-    if (differentRecordResolution) videoEncoderRecord.start(startTs)
-    audioEncoder.start(startTs)
-    glInterface.addMediaCodecSurface(videoEncoder.inputSurface)
-    if (differentRecordResolution) glInterface.addMediaCodecRecordSurface(videoEncoderRecord.inputSurface)
+  }
+
+  /**
+   * Whether [startSources] has brought the shared source lifecycle up and [stopSources] has not yet
+   * taken it down.
+   *
+   * The three entry points into that one lifecycle were each guarded on a consumer flag --
+   * startStream and stopStream on isStreaming, startRecord and stopRecord on isRecording -- with
+   * nothing keeping either flag consistent with whether the sources were actually running.
+   * startRecord's catch cleared isRecording without stopping them, so the sources could be left
+   * running with both flags false; a later startStream then took the !isRecording branch, called
+   * startSources() again, and reached codec.start() on an already-started MediaCodec:
+   *
+   *     IllegalStateException: start() is valid only at Configured state; currently at Running state
+   *
+   * The consumer flags still answer "is anyone else using the sources?", which is what the stop-side
+   * guards need. This one answers "are they up?", which is what the start side needs.
+   *
+   * Volatile: written and read on whichever app thread drives start and stop.
+   */
+  @Volatile
+  private var sourcesRunning = false
+
+  /**
+   * Idempotent and transactional.
+   *
+   * Idempotent so a caller does not have to infer from a consumer flag whether the sources are
+   * already up; a second call does nothing rather than crashing on MediaCodec state. Transactional
+   * so a partial failure cannot leave half a lifecycle running, which is what turned one failed
+   * attempt into a permanent wedge.
+   *
+   * [sourcesRunning] is set before the body so the cleanup path can run, and every line of
+   * [stopSourcesImp] is individually safe against a component that never started.
+   */
+  private fun startSources() {
+    if (sourcesRunning) return
+    sourcesRunning = true
+    try {
+      if (!glInterface.isRunning) glInterface.start()
+      if (!videoSource.isRunning()) {
+        videoSource.start(glInterface.surfaceTexture)
+      }
+      audioSource.start(getMicrophoneData)
+      val startTs = TimeUtils.getCurrentTimeMicro()
+      videoEncoder.start(startTs)
+      if (differentRecordResolution) videoEncoderRecord.start(startTs)
+      audioEncoder.start(startTs)
+      glInterface.addMediaCodecSurface(videoEncoder.inputSurface)
+      if (differentRecordResolution) glInterface.addMediaCodecRecordSurface(videoEncoderRecord.inputSurface)
+    } catch (e: RuntimeException) {
+      try {
+        stopSourcesImp()
+      } catch (cleanup: RuntimeException) {
+        e.addSuppressed(cleanup)
+      } finally {
+        sourcesRunning = false
+      }
+      throw e
+    }
   }
 
   private fun stopSources() {
+    if (!sourcesRunning) return
+    sourcesRunning = false
+    stopSourcesImp()
+  }
+
+  /**
+   * The teardown without the [sourcesRunning] guard. [release] calls this so a release on a
+   * never-started stream still runs every line.
+   */
+  private fun stopSourcesImp() {
     if (!isOnPreview) videoSource.stop()
     audioSource.stop()
     glInterface.removeMediaCodecSurface()
@@ -541,7 +653,9 @@ abstract class StreamBase(
     if (isStreaming) stopStream()
     if (isRecording) stopRecord()
     if (isOnPreview) stopPreview()
-    stopSources()
+    // The unguarded teardown: a release on a never-started stream must still run every line.
+    sourcesRunning = false
+    stopSourcesImp()
     videoSource.release()
     audioSource.release()
     if (glInterface.isRunning) glInterface.surfaceTexture.tryClear()
