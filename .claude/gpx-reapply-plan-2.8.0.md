@@ -15,19 +15,19 @@ later items depend on earlier ones.
 - [x] R3b — VideoEncoderHelper hvcC csd-0 parsing + start-code ordering bounds check (found during R2; was not in the original item list) — `90b3fc502`
 - [ ] R4 — StreamBase keyframe on `startStream()` and on `startRecord()` — folded into the StreamBase block, see below
 - [x] R5 — `takePhoto(width, height, callback)` overload (GlInterface, GlStreamInterface, OpenGlView) — `614488cd2`
-- [ ] R6 — FlvMuxerRecordController AVCC SPS/PPS fallback
-- [ ] R7 — SRT inbound-silence dead-link detection + `getInboundSilenceMs`
-- [ ] R8 — SRT handshake retransmit with backoff
-- [ ] R9 — Encoder continuous timestamps across stop/start
-- [ ] R10 — Log-noise reduction (ImageStreamObject, SurfaceManager, BaseEncoder cold start)
+- [x] R6 — FlvMuxerRecordController AVCC SPS/PPS fallback — `f594eef93`
+- [x] R7 — SRT inbound-silence dead-link detection + `getInboundSilenceMs` — `a7bbe6a63`
+- [x] R8 — SRT handshake retransmit with backoff — `a7bbe6a63`
+- [x] R9 — Encoder continuous timestamps across stop/start — `c47012f52` (BaseEncoder, VideoEncoder), `68b6a0a6c` (AudioEncoder)
+- [x] R10 — Log-noise reduction (ImageStreamObject, SurfaceManager, BaseEncoder cold start) — `5b3d78c6b`; the BaseEncoder part is the `codecStarted` flush gate in `c47012f52`
 - [x] R11 — Stream-only overlay plane + live force-render toggle (slate) — `10d264057`
 - [ ] R12 — Writer-side byte counter, rollover push, visible write errors
 - [ ] R13 — RtmpSender guard against an incomplete H265/H264 parameter set
 - [ ] R14 — WHIP/Millicast stack (largest item; see below)
 - [ ] R15 — `warmSources()` seam on StreamBase
 - [ ] R16 — `stop()` GL cleanup race fix
-- [ ] R17 — Zero B-frames request with vendor-rejection fallback
-- [ ] R18 — Per-encoder profile/level + negotiated-format seam
+- [x] R17 — Zero B-frames request with vendor-rejection fallback — `383d55dfa`
+- [x] R18 — Per-encoder profile/level + negotiated-format seam — `383d55dfa` (VideoEncoder half; the StreamBase `prepareVideo` parameters are still open)
 - [ ] R19 — Record codec applied coherently on a prepared encoder (redesign, see below)
 - [ ] R20 — Build green (`gradlew assembleDebug`)
 - [ ] R21 — Tag `2.8.0-gpx1`, push branch and tag
