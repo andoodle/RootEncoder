@@ -16,11 +16,13 @@
 
 package com.pedro.library.view;
 
+import android.graphics.Bitmap;
 import android.graphics.Point;
 import android.graphics.SurfaceTexture;
 import android.view.Surface;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 
 import com.pedro.encoder.input.gl.render.filters.BaseFilterRender;
 
@@ -213,4 +215,18 @@ public interface GlInterface {
   boolean isRunning();
 
   void setRenderErrorCallback(RenderErrorCallback callback);
+
+  /**
+   * Composite a full-frame bitmap into the stream encoder output only.
+   *
+   * A filter feeds the stream encoder, the record encoder, the preview and photo captures from one
+   * filtered texture. This plane reaches the stream encoder alone, so a graphic meant for viewers
+   * leaves the recording file, the preview and photo captures untouched. Pass null to clear.
+   *
+   * Implemented by GlStreamInterface; view-based interfaces have no separate stream and record
+   * branches to split, so they no-op.
+   *
+   * @param bitmap overlay image stretched to the full stream frame, or null to remove it.
+   */
+  void setStreamOverlay(@Nullable Bitmap bitmap);
 }

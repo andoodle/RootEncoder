@@ -212,6 +212,11 @@ open class OpenGlView : SurfaceView, GlInterface, OnFrameAvailableListener, Surf
 
     override fun getEncoderSize() = Point(encoderWidth, encoderHeight)
 
+    // The stream-only overlay plane splits the stream encoder surface from the record encoder
+    // surface. View-based rendering draws one screen with no such split, so there is nothing to
+    // separate here.
+    override fun setStreamOverlay(bitmap: android.graphics.Bitmap?) = Unit
+
     override fun takePhoto(takePhotoCallback: TakePhotoCallback) {
         this.takePhotoCallback = takePhotoCallback
         this.photoWidth = encoderWidth

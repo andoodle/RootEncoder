@@ -17,6 +17,7 @@
 package com.pedro.library.view
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Point
 import android.graphics.SurfaceTexture
 import android.graphics.SurfaceTexture.OnFrameAvailableListener
@@ -31,6 +32,7 @@ import com.pedro.common.secureSubmit
 import com.pedro.encoder.input.gl.FilterAction
 import com.pedro.encoder.input.gl.SurfaceManager
 import com.pedro.encoder.input.gl.render.MainRender
+import com.pedro.encoder.input.gl.render.StreamOverlayRender
 import com.pedro.encoder.input.gl.render.filters.BaseFilterRender
 import com.pedro.encoder.input.gl.render.filters.NoFilterRender
 import com.pedro.encoder.input.sources.OrientationConfig
@@ -67,6 +69,8 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
   private val surfaceManagerPreview = SurfaceManager()
   private val multiPreviewSurfaceManagers = ConcurrentHashMap<Surface, PreviewSurfaceInfo>()
   private val mainRender = MainRender()
+  // Drawn into the stream encoder surface only, never the record encoder, preview or photo.
+  private val streamOverlayRender = StreamOverlayRender()
 
   private var encoderWidth = 0
   private var encoderHeight = 0
@@ -134,10 +138,37 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
 
   override fun setForceRender(enabled: Boolean, fps: Int) {
     forceRender.setEnabled(enabled, fps)
+    // Apply the toggle to a render loop that is already live. start() is the only other place that
+    // reads the flag, so without this a caller that enables force-render mid-session — because the
+    // camera input died and the encoder must keep producing frames for an overlay — gets nothing
+    // until the next GL restart.
+    if (running.get()) {
+      if (enabled && !forceRender.isRunning()) {
+        forceRender.start(forceRenderCallback)
+      } else if (!enabled && forceRender.isRunning()) {
+        forceRender.stop()
+      }
+    }
   }
 
   override fun setForceRender(enabled: Boolean) {
     setForceRender(enabled, 5)
+  }
+
+  // Shared by start() and the live setForceRender toggle above.
+  private val forceRenderCallback: () -> Unit = {
+    executor?.execute {
+      try {
+        draw(true)
+      } catch (e: RuntimeException) {
+        renderErrorCallback?.onRenderError(e) ?: throw e
+      }
+    }
+    Unit
+  }
+
+  override fun setStreamOverlay(bitmap: Bitmap?) {
+    streamOverlayRender.setBitmap(bitmap)
   }
 
   override fun isRunning(): Boolean = running.get()
@@ -221,15 +252,7 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
       } else {
         mainRender.getSurfaceTexture().setOnFrameAvailableListener(this)
       }
-      forceRender.start {
-        executor?.execute {
-          try {
-            draw(true)
-          } catch (e: RuntimeException) {
-            renderErrorCallback?.onRenderError(e) ?: throw e
-          }
-        }
-      }
+      forceRender.start(forceRenderCallback)
     }
   }
 
@@ -259,6 +282,9 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
     surfaceManagerPreview.release()
     surfaceManager.release()
     mainRender.release()
+    // The EGL context that owned the overlay's GL objects is gone, so invalidate its handles. The
+    // next draw on a fresh context re-creates them and re-uploads a still-visible bitmap.
+    streamOverlayRender.release()
   }
 
   private fun draw(forced: Boolean) {
@@ -306,6 +332,9 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
       if (surfaceManagerEncoder.makeCurrent()) {
         mainRender.drawScreenEncoder(w, h, orientation, streamOrientation,
           isStreamVerticalFlip, isStreamHorizontalFlip, streamViewPort)
+        // Drawn over the frame content into this surface only. The record encoder branch below
+        // renders from the same filtered texture but never sees this.
+        streamOverlayRender.draw(context)
         surfaceManagerEncoder.setPresentationTime(timestamp)
         surfaceManagerEncoder.swapBuffer()
       }
