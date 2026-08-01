@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<!-- CANONICAL CONTENT FOR AI: the complete recap (+ AI notes) is the raw-markdown
+     block below, kept FIRST on purpose. Read just this block (Read with a line limit)
+     to get the whole recap cheaply. Source of truth; the styled body is a human VIEW. -->
+<script type="text/markdown" id="recap">
+# Rebuild the GPX fork on upstream 2.8.0
+
+**Date:** 2026-07-31 22:22 · **Repos:** `andoodle/RootEncoder` (primary), `andoodle/gpxstream-app` (one commit)
+
+## Outcome
+
+The GPX fork now has two independent lines, both published.
+
+- `gpx-master` @ `0802b1120`, tag `2.7.5-gpx25` — **frozen**, consumed by `gpxnative-ai`. Untouched this session.
+- `gpx-2.8` @ `1773819bb`, tag `2.8.0-gpx1` — **new**, consumed by `gpxstream-app` only. 22 commits.
+
+`andoodle/RootEncoder` `master` was fast-forwarded from `49421b686` to `9a9ca124f`, pulling
+56 upstream commits from `pedroSG94/RootEncoder` (2026-07-20 → 2026-07-30). `gpx-2.8` was
+branched from that new master and every GPX patch re-applied on top, one work item per commit.
+
+`gpxstream-app/CLAUDE.md` was repinned from `2.7.5-gpx25` to `2.8.0-gpx1` (commit `0086689`, pushed to `main`).
+
+## Verification status — read this before trusting the branch
+
+`gradlew assembleDebug test` passes across every fork module and the sample app. **That is the
+entire verification.** Nothing on `gpx-2.8` has run on a device or against a live ingest.
+
+The WHIP/Millicast behaviour it carries was originally established by live testing against
+Dolby/Millicast on the `2.7.5-gpx*` line. Here it is re-derived from reading those patches and
+compiled. It is not re-proven. **Device-test the WHIP path before `gpxstream-app` writes code
+that depends on it.**
+
+One structural check did pass and is worth knowing about: every file the old branch changed
+(excluding its session-recap HTML) is also changed on `gpx-2.8`, and `gpx-2.8` changes no other
+files. That check caught a real gap — `library/generic/GenericStream.kt` had been analysed and
+then never applied. Run it after any future re-apply:
+
+```
+$old = git diff --name-only <old-base> gpx-master | ? { $_ -notmatch "session-recaps" }
+$new = git diff --name-only origin/master gpx-2.8 | ? { $_ -notmatch "gpx-reapply-plan" }
+$old | ? { $new -notcontains $_ }   # should be empty
+```
+
+## What upstream brought in (the reason for the move)
+
+- VP8 and VP9 encoding, end to end: FLV/RTMP packets, RTSP/WHIP RTP packets, SDP bodies, SRT/MPEG-TS.
+- HE-AAC (`AudioCodec.HE_AAC`) for RTMP and RTSP.
+- AV1 packetization refactor.
+- Camera2 handler leak fix; leak fixes across 16 audio/video source files.
+- `glInterface.surfaceTexture.tryClear()` guarded on `isRunning`.
+- FLV record-controller codec checks; SRT/UDP `setVideoCodec` fix.
+
+Totals: 120 files, +3170 / −1783.
+
+## The API break that shaped the whole re-apply
+
+**`BaseEncoder.type` changed from a MIME `String` to a `com.pedro.common.Codec` enum, and
+`getType()`/`setType()` were deleted.** Upstream also changed several `SdpBody` factory
+signatures and moved parsers into `com.pedro.common`.
+
+Every GPX patch that set an encoder's codec was written against the string form. This is why
+the two fork lines cannot be swapped and why a consumer compiles against one or the other.
+
+Counter-intuitively it *simplified* the largest item. The old record-codec patches
+(`021290036`, `c7a109a5c`, `3a5d075ed`, `0802b1120`) existed largely to keep a MIME-string
+mutation exception-safe on a prepared encoder. An enum assignment cannot half-apply, so that
+wrapper is gone. The `try`/`catch` that remains is for a different, still-real reason:
+`videoEncoderRecord.restart()` reaches `MediaCodec.start()`, which brings up a second hardware
+video encoder while the stream encoder and camera are live — at or past the concurrent-encoder
+limit on some SoCs.
+
+## Correction: R14's scope was overstated in the original plan
+
+The plan described the WHIP item from the old branch's **commit titles**. Three of those are
+not in the old branch's final tree at all:
+
+- **HTTPS + Bearer auth and the `?auth=` token** reached upstream independently. `origin/master`
+  already sends `Authorization: Bearer $token`, identically to `gpx-master`. Old commit
+  `5d3148119` is literally titled "WHIP minimal Millicast fix + pedro upstream auth" — the handover.
+- **`transport-cc` and MID RTP header extensions** (commit `84d19931c`): grepping `extmap` and
+  `transport-cc` across `gpx-master`'s `rtsp/`, `whip/`, `library/` returns nothing outside one
+  code comment. A later commit removed them.
+- **H264 `profile-level-id`, `msid`, port 9** (commit `74eb7c2e5`): absent from the old branch's
+  final `CommandsManager.kt`.
+
+**Lesson: a fork's commit titles are not its diff.** Always derive scope from
+`git diff <merge-base> <branch> -- <file>`, never from `git log --oneline`.
+
+What actually survives and was re-applied: DTLS client role + `DtlsClient.kt`, ICE
+binding-check and nomination retransmits, held ICE socket closed on disconnect, `a=setup`
+parsing into `SdpInfo.setupRole`, `lastOrNull` in `SdpParser`, the 1200-byte packet cap,
+`a=msid-semantic: WMS` without the wildcard, and the offer-SDP log.
+
+## How 40 old commits became 22
+
+**Dropped as net-zero** (each is a change plus its own later revert):
+`891740643`+`b0c0332eb` (TextStreamObject log), `20e3856cb`+`6be0e4f19` (WHIP in-band SPS),
+`c125f4d1b`+`2d1855a90` (`?token=` added then removed). **Dropped as non-code:** three
+session-recap HTML files, five merge commits. **Folded:** `f8f74f373` fixes bugs the
+2026-06-25 legacy bundle introduced, so it merged into the corrected re-apply rather than
+landing after it.
+
+**Found during the work, not in the original plan:** the 2026-06-25 bundle also carried hvcC
+`csd-0` parsing plus Annex-B bounds checks in `VideoEncoderHelper` (item R3b, commit
+`90b3fc502`). Upstream still lacks both. The bounds check guards a real crash — the three array
+sizes are computed by subtracting start-code offsets from each other, so an out-of-order
+`csd-0` throws `NegativeArraySizeException`.
+
+## Concrete bugs the re-applied patches prevent
+
+Worth recording because these justify the size of individual items:
+
+- **`StreamBase` source lifecycle** (`cd89bb86b`) — `startRecord`'s catch cleared `isRecording`
+  without stopping the sources, so both consumer flags could read false while the sources ran. A
+  later `startStream` took the `!isRecording` branch, called `startSources()` a second time, and
+  hit `IllegalStateException: start() is valid only at Configured state; currently at Running
+  state`. One failed attempt wedged the pipeline permanently. Fixed by a dedicated
+  `sourcesRunning` flag: consumer flags answer "is anyone else using the sources?", the new one
+  answers "are they up?".
+- **`RtmpSender.setVideoInfo`** (`dabdccb17`) — threw `IllegalArgumentException` on a null
+  pps/vps. It runs on the MediaCodec callback thread (`VideoEncoder.formatChanged` →
+  `sendSPSandPPS` → `onVideoInfo`), so the throw ended the process with no app-side catch able
+  to intervene.
+- **`GlStreamInterface.stop()`** (`12f5afaaf`) — submitted the GL teardown then called
+  `shutdownNow()`, racing to cancel the task it had just queued.
+- **`CodecUtil.isCBRModeSupported`** (`62d7009e8`) — dereferenced `getEncoderCapabilities()`
+  without a null check; it returns null on vendor codecs that advertise the mime.
+- **`Mpeg2TsMuxerRecordController.writePackets`** (`6794feb0a`) — swallowed every write
+  exception, so a wedged or full disk recorded nothing for the rest of the session, silently.
+
+## Deliberate deviations from the old code
+
+- **Comments compressed.** The old `StreamBase.kt` carried ~200 lines of doc comment narrating
+  the fork's own history ("Until gpxnative-ai#282 there was…", "Moved AFTER the reset") and
+  citing session/issue numbers unresolvable from this repo. Per `~/.claude/rules/editing-rules.md`
+  the narration was dropped and the durable facts kept: codec-namespaced `CodecProfileLevel`
+  constants, why each field is `@Volatile`, label-after-prepare ordering, replay-may-clear-never-set.
+- **Dead debug removed.** `CodecUtil` kept two `Log.d("VBR", …)` lines and an unused
+  `isVbrSupported` local; the `prepend-sps-pps-to-idr-frames` call kept a `try`/`catch` that
+  cannot fire (`MediaFormat.setInteger` is a map write).
+- **Stale comment corrected.** The old SRT watchdog KDoc claimed the threshold scales with
+  latency while the code used a fixed 5,500 ms — a later commit changed the value without
+  updating the text. The new comment matches the code.
+
+## Known oddity, deliberately preserved
+
+The SRT streamid now comes from `UrlParser.getFullPath()` rather than `urlParser.path`, so the
+query string stays attached. The old fork made that change for Millicast SRT ingest, where the
+publishing token rides in the URL. Side effect: client-side parameters like `latency` also land
+inside the streamid, which looks wrong. **Kept as-is rather than "corrected"** — it was
+validated against live Millicast ingest and cannot be tested here. Worth revisiting with a real
+Millicast endpoint.
+
+## Open items
+
+1. **Device-test `gpx-2.8`, WHIP path first.** The only unverified area. Blocks confident use.
+2. **Revisit the SRT `getFullPath()` streamid** when a Millicast endpoint is available.
+3. **`gpx-master` stays frozen.** A fix `gpxnative-ai` genuinely needs is a deliberate unfreeze
+   decision with the owner, not a routine commit.
+
+## Reference documents written this session
+
+- `RootEncoder/.claude/gpx-branch-policy.md` — branch/tag tables, why the lines can't be
+  swapped, four rules (no GPX commits on `gpx-master`, new work on `gpx-2.8`, never move a
+  published tag, how the next upstream sync proceeds).
+- `RootEncoder/.claude/gpx-reapply-plan-2.8.0.md` — the item-by-item R1–R22 checklist with
+  commit hashes, dropped commits and reasons, and the R14 scope correction.
+- `gpxstream-app/CLAUDE.md` — repinned, with the two-line constraint and verification status.
+
+## AI notes (scratch — optional, written by Claude for future sessions)
+
+- **Process error made this session:** ran `git add -A` for the R6 commit, which swept unrelated
+  SRT work into it. Caught it via `git show --stat`, reset and re-committed in two. Nothing was
+  pushed in between. When committing one item out of a multi-item working tree, stage explicit
+  paths — `git add -A` is only safe when the tree contains exactly one item's work.
+- **Timing judgment worth reusing:** `gpxstream-app` had zero `.kt`/`.java` files. Doing the
+  migration *before* any app code binds to the fork API was the cheapest this would ever be. When
+  a dependency upgrade has a breaking API change, "how much consumer code exists yet?" should be
+  the first question asked.
+- **Spec-grounding beat guessing.** Rather than assume which fork features the rewrite needs, I
+  grepped `gpxstream-app/docs/spec/` and found explicit requirements: slate overlay
+  (`camera-input.md` B-CAM-05), rollover byte counter (`recording-vod.md` B-VOD-05, MB-VOD-01/02),
+  photo capture (MB-VOD-19), VBR rollover (B-VOD-07), record-codec-before-muxer (MB-VOD-13),
+  B-frames disabled for Dolby/Millicast (`encoder-config.md`:393). That turned "probably keep it"
+  into "required by spec line X" for nearly every item.
+- **The plan document earned its place.** Committing the R-numbered checklist *first* and ticking
+  it as work landed meant the two mid-flight plan revisions (StreamBase items are one block; R14
+  is smaller than its commit titles) got recorded rather than lost.
+- **Next session:** if asked to sync upstream again, the procedure is in
+  `.claude/gpx-branch-policy.md`; fast-forward `master`, branch a new GPX line off it, and re-run
+  the file-coverage check above at the end.
+</script>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Rebuild the GPX fork on upstream 2.8.0 — 2026-07-31 22:22</title>
+<style>
+  :root{--red-500:#EF3340;--red-700:#B3242B;--red-50:#FDECEC;--paper:#FAF8F5;--card:#FFFFFF;
+    --border:#DDD7CF;--border-subtle:#ECE7E0;--fg-1:#181512;--fg-2:#3D3833;--fg-3:#6B645C;
+    --ok:#12B76A;--attn:#F79009;--chip:#F1ECE5;
+    --font-display:"Barlow Condensed","Oswald","Segoe UI Semibold",system-ui,sans-serif;
+    --font-mono:"Roboto Mono",ui-monospace,"Cascadia Code",Consolas,Menlo,monospace;
+    --radius-md:4px;--radius-lg:8px;--shadow:0 1px 2px rgba(11,9,8,.06),0 4px 8px -2px rgba(11,9,8,.06);--maxw:880px;}
+  *{box-sizing:border-box;}html,body{margin:0;padding:0;}
+  body{background:var(--paper);color:var(--fg-2);font-family:var(--font-mono);font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 28px 72px;}
+  .topbar{max-width:var(--maxw);margin:0 auto;padding:26px 28px 0;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;}
+  .logo{display:inline-flex;align-items:center;gap:9px;}
+  .logo .flag{background:var(--red-500);color:#fff;font-family:var(--font-display);font-weight:800;font-size:17px;padding:3px 7px 2px;border-radius:2px;line-height:1;}
+  .logo .word{font-family:var(--font-display);font-weight:700;font-size:17px;letter-spacing:.14em;text-transform:uppercase;color:var(--fg-1);}
+  .doc-meta{font-size:11px;letter-spacing:.13em;text-transform:uppercase;color:var(--fg-3);text-align:right;}
+  .doc-meta .tag{color:var(--red-700);font-weight:700;}
+  .topdivide{max-width:var(--maxw);margin:16px auto 0;padding:0 28px;}.topdivide hr{border:0;border-top:2px solid var(--red-500);margin:0;}
+  .hero{padding:38px 0 4px;}
+  .eyebrow{font-size:11px;font-weight:700;letter-spacing:.26em;text-transform:uppercase;color:var(--red-700);margin:0 0 12px;}
+  h1{font-family:var(--font-display);font-weight:800;font-size:46px;line-height:1.03;text-transform:uppercase;color:var(--fg-1);margin:0 0 14px;}
+  .standfirst{font-size:16px;color:var(--fg-2);max-width:64ch;margin:0;}
+  .stats{display:flex;flex-wrap:wrap;gap:10px;margin-top:22px;}
+  .stat{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-md);padding:9px 15px;box-shadow:var(--shadow);}
+  .stat b{font-family:var(--font-display);font-weight:700;font-size:22px;color:var(--fg-1);display:block;line-height:1;margin-bottom:3px;}
+  .stat span{font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:var(--fg-3);}
+  details{padding-top:34px;border:0;}details+details{border-top:1px solid var(--border-subtle);}
+  summary{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;cursor:pointer;list-style:none;padding-top:6px;}
+  summary::-webkit-details-marker{display:none;}summary .htext{flex:1;}
+  summary .chev{font-family:var(--font-mono);font-weight:700;font-size:20px;line-height:1;color:var(--red-500);margin-top:16px;transition:transform .18s ease;user-select:none;}
+  details[open] summary .chev{transform:rotate(90deg);}summary:hover h2{color:var(--red-700);}
+  .count{font-family:var(--font-mono);font-size:12px;font-weight:700;color:var(--red-700);background:var(--red-50);border-radius:20px;padding:2px 9px;margin-left:10px;vertical-align:middle;}
+  .secbody{padding-top:14px;}
+  .sec-eyebrow{font-size:11px;font-weight:700;letter-spacing:.22em;text-transform:uppercase;color:var(--red-700);margin:0 0 8px;display:flex;align-items:center;gap:10px;}
+  .sec-eyebrow::before{content:"";width:18px;height:2px;background:var(--red-500);display:inline-block;}
+  h2{font-family:var(--font-display);font-weight:700;font-size:27px;line-height:1.1;text-transform:uppercase;color:var(--fg-1);margin:0;transition:color .12s;}
+  h3{font-family:var(--font-mono);font-weight:700;font-size:13.5px;color:var(--fg-1);margin:0 0 6px;}
+  p{margin:0 0 12px;}p:last-child{margin-bottom:0;}strong{color:var(--fg-1);font-weight:700;}
+  code{font-family:var(--font-mono);background:var(--chip);padding:.1em .4em;border-radius:3px;font-size:.86em;color:var(--fg-1);}
+  .cards{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:18px 20px;box-shadow:var(--shadow);}
+  .card .tag{display:inline-flex;align-items:center;gap:8px;font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px;}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block;}.dot.ok{background:var(--ok);}.dot.attn{background:var(--attn);}
+  .card p{font-size:13.5px;margin:0;}
+  .timeline{display:grid;}
+  .commit{display:grid;grid-template-columns:84px 1fr;gap:14px;align-items:baseline;padding:9px 0;border-bottom:1px solid var(--border-subtle);}
+  .commit:last-child{border-bottom:0;}
+  .commit .hash{background:var(--fg-1);color:#fff;font-size:11.5px;padding:3px 0;border-radius:3px;text-align:center;letter-spacing:.02em;}
+  .commit .msg{font-size:13.5px;color:var(--fg-2);}.commit .msg strong{color:var(--fg-1);}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  .nugget{background:var(--card);border:1px solid var(--border);border-left:3px solid var(--red-500);border-radius:var(--radius-md);padding:13px 16px;box-shadow:var(--shadow);}
+  .nugget h3{margin-bottom:5px;}.nugget p{font-size:12.5px;color:var(--fg-2);margin:0;}
+  ul.clean{list-style:none;margin:0;padding:0;display:grid;gap:8px;}
+  ul.clean li{position:relative;padding-left:24px;font-size:13.5px;color:var(--fg-2);}
+  ul.clean li::before{content:"";position:absolute;left:3px;top:8px;width:7px;height:7px;background:var(--red-500);border-radius:1px;transform:rotate(45deg);}
+  ul.clean li strong{color:var(--fg-1);}
+  .check{list-style:none;margin:0;padding:0;display:grid;gap:11px;}
+  .check li{position:relative;padding-left:28px;font-size:13.5px;color:var(--fg-2);}
+  .check li::before{content:"";position:absolute;left:0;top:2px;width:15px;height:15px;border:2px solid var(--attn);border-radius:3px;}
+  .check li strong{color:var(--fg-1);}
+  .snap h3{margin:16px 0 6px;}
+  pre{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:13px 16px;overflow-x:auto;font-size:12px;line-height:1.5;color:var(--fg-2);box-shadow:var(--shadow);margin:0 0 6px;}
+  pre code{background:none;padding:0;color:var(--fg-2);}
+  .resume .secbody{background:var(--fg-1);color:#EDE9E3;border-radius:var(--radius-lg);padding:20px 24px;margin-top:14px;}
+  .resume pre{background:#231e1a;border:1px solid #3a332d;color:#D9D2CA;font-size:12.5px;box-shadow:none;margin:0;}
+  .raw pre{max-height:520px;overflow:auto;font-size:11.5px;white-space:pre-wrap;word-break:break-word;}
+  .raw .hint{font-size:11px;color:var(--fg-3);margin:0 0 8px;}
+  footer{max-width:var(--maxw);margin:48px auto 0;padding:20px 28px 36px;border-top:1px solid var(--border);display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--fg-3);}
+  .controls{max-width:var(--maxw);margin:18px auto 0;padding:0 28px;text-align:right;}
+  .controls button{font-family:var(--font-mono);font-size:10.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--fg-3);background:none;border:1px solid var(--border);border-radius:20px;padding:5px 12px;cursor:pointer;}
+  .controls button:hover{color:var(--red-700);border-color:var(--red-500);}
+  @media (max-width:640px){h1{font-size:34px;}h2{font-size:23px;}.cards,.grid2{grid-template-columns:1fr;}.commit{grid-template-columns:72px 1fr;}}
+  @media print{:root{--paper:#fff;}body{background:#fff;font-size:11pt;}.card,.nugget,.stat,pre{box-shadow:none;}
+    .controls,summary .chev{display:none;}details>.secbody{display:block!important;}
+    details,.card,.nugget,.commit{page-break-inside:avoid;}*{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <span class="logo"><span class="flag">GPX</span><span class="word">Stream</span></span>
+    <span class="doc-meta"><span class="tag">Session Recap · Internal</span><br />RootEncoder · 2026-07-31</span>
+  </div>
+  <div class="topdivide"><hr /></div>
+  <div class="wrap">
+    <div class="hero">
+      <p class="eyebrow">Session Recap · 2026-07-31 22:22</p>
+      <h1>Rebuild the GPX fork on upstream 2.8.0</h1>
+      <p class="standfirst">The fork now has two independent lines. <code>gpx-master</code> / <code>2.7.5-gpx25</code> stays frozen for <code>gpxnative-ai</code>; the new <code>gpx-2.8</code> / <code>2.8.0-gpx1</code> carries 56 upstream commits plus every GPX patch re-applied, for <code>gpxstream-app</code> alone.</p>
+      <div class="stats">
+        <div class="stat"><b>56</b><span>Upstream commits in</span></div>
+        <div class="stat"><b>22</b><span>Commits on gpx-2.8</span></div>
+        <div class="stat"><b>40→22</b><span>Old patches collapsed</span></div>
+        <div class="stat"><b>Build</b><span>Only verification</span></div>
+      </div>
+    </div>
+    <div class="controls">
+      <button type="button" onclick="document.querySelectorAll('details').forEach(d=>d.open=true)">Expand all</button>
+      <button type="button" onclick="document.querySelectorAll('details').forEach(d=>d.open=false)">Collapse all</button>
+    </div>
+
+    <details open>
+      <summary><span class="htext"><span class="sec-eyebrow">Status</span><h2>Where things stand</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <div class="cards">
+          <div class="card">
+            <span class="tag"><span class="dot ok"></span>Published</span>
+            <p><code>gpx-2.8</code> @ <code>1773819bb</code>, tag <code>2.8.0-gpx1</code>. <code>gpx-master</code> @ <code>0802b1120</code> and tag <code>2.7.5-gpx25</code> both confirmed unmoved on the remote, so <code>gpxnative-ai</code> is unaffected.</p>
+          </div>
+          <div class="card">
+            <span class="tag"><span class="dot attn"></span>Build-verified only</span>
+            <p><code>gradlew assembleDebug test</code> passes across all modules and the sample app. Nothing has run on a device or against a live ingest. The WHIP behaviour is re-derived from the old line, not re-proven.</p>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details open>
+      <summary><span class="htext"><span class="sec-eyebrow">Next</span><h2>Open items<span class="count">3</span></h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <ul class="check">
+          <li><strong>Device-test <code>gpx-2.8</code>, WHIP path first.</strong> The only unverified area, and it blocks confident use by <code>gpxstream-app</code>.</li>
+          <li><strong>Revisit the SRT streamid.</strong> It now uses <code>UrlParser.getFullPath()</code>, so the query string — including client-side <code>latency</code> — rides inside the streamid. Preserved deliberately from the old line; check against a real Millicast endpoint.</li>
+          <li><strong>Keep <code>gpx-master</code> frozen.</strong> A fix <code>gpxnative-ai</code> genuinely needs is a deliberate unfreeze decision with the owner, not a routine commit.</li>
+        </ul>
+      </div>
+    </details>
+
+    <details>
+      <summary><span class="htext"><span class="sec-eyebrow">The hard part</span><h2>What shaped the work<span class="count">3</span></h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <div class="grid2">
+          <div class="nugget">
+            <h3>The API break</h3>
+            <p><code>BaseEncoder.type</code> went from a MIME <code>String</code> to a <code>Codec</code> enum; <code>getType()</code>/<code>setType()</code> deleted. Every GPX patch that set a codec was written against the string. This is exactly why the two fork lines cannot be swapped.</p>
+          </div>
+          <div class="nugget">
+            <h3>It simplified the biggest item</h3>
+            <p>The old record-codec patches existed largely to keep a MIME-string mutation exception-safe. An enum assignment cannot half-apply, so that wrapper is gone. The remaining <code>try</code>/<code>catch</code> guards <code>MediaCodec.start()</code> on a second hardware encoder.</p>
+          </div>
+          <div class="nugget">
+            <h3>Commit titles lied about scope</h3>
+            <p>Three WHIP changes named in old commit titles are absent from that branch's final tree — auth reached upstream independently, and <code>transport-cc</code>/MID extensions plus H264 <code>profile-level-id</code> were removed by later commits. Derive scope from the diff, never the log.</p>
+          </div>
+          <div class="nugget">
+            <h3>A structural check that found a real gap</h3>
+            <p>Comparing the file set changed by each branch caught <code>GenericStream.kt</code>, which had been analysed and then never applied. Worth re-running after any future re-apply.</p>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details>
+      <summary><span class="htext"><span class="sec-eyebrow">Evidence</span><h2>Bugs the patches prevent<span class="count">5</span></h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <ul class="clean">
+          <li><strong>Permanent pipeline wedge</strong> — <code>startRecord</code>'s catch cleared <code>isRecording</code> without stopping the sources, so a later <code>startStream</code> called <code>startSources()</code> twice and hit <code>IllegalStateException: start() is valid only at Configured state; currently at Running state</code>. Fixed by a dedicated <code>sourcesRunning</code> flag (<code>cd89bb86b</code>).</li>
+          <li><strong>Process death mid-stream</strong> — <code>RtmpSender.setVideoInfo</code> threw on a null pps/vps while running on the MediaCodec callback thread, where no app-side catch can intervene (<code>dabdccb17</code>).</li>
+          <li><strong>Dropped GL teardown</strong> — <code>GlStreamInterface.stop()</code> queued the release then called <code>shutdownNow()</code>, racing to cancel it (<code>12f5afaaf</code>).</li>
+          <li><strong>Null dereference in encoder selection</strong> — <code>getEncoderCapabilities()</code> returns null on vendor codecs that advertise the mime (<code>62d7009e8</code>).</li>
+          <li><strong>Silent recording loss</strong> — the MPEG-TS writer swallowed every write exception, so a full or wedged disk recorded nothing with no report (<code>6794feb0a</code>).</li>
+        </ul>
+      </div>
+    </details>
+
+    <details>
+      <summary><span class="htext"><span class="sec-eyebrow">Reference</span><h2>Commits on gpx-2.8<span class="count">22</span></h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <div class="timeline">
+          <div class="commit"><span class="hash">62d7009e8</span><span class="msg"><strong>R1</strong> — unreadable encoder capability set counts as no CBR</span></div>
+          <div class="commit"><span class="hash">3751dc648</span><span class="msg"><strong>R2+R3</strong> — forced VBR mode; SPS/PPS ahead of every IDR frame</span></div>
+          <div class="commit"><span class="hash">90b3fc502</span><span class="msg"><strong>R3b</strong> — hvcC csd-0 parsing + Annex-B bounds check</span></div>
+          <div class="commit"><span class="hash">614488cd2</span><span class="msg"><strong>R5</strong> — photo capture at an explicit size</span></div>
+          <div class="commit"><span class="hash">10d264057</span><span class="msg"><strong>R11</strong> — stream-only overlay plane; live force-render toggle</span></div>
+          <div class="commit"><span class="hash">855278133</span><span class="msg">docs — R1–R11 progress and two plan revisions</span></div>
+          <div class="commit"><span class="hash">f594eef93</span><span class="msg"><strong>R6</strong> — AVCC fallback for FLV SPS/PPS extraction</span></div>
+          <div class="commit"><span class="hash">a7bbe6a63</span><span class="msg"><strong>R7+R8</strong> — SRT inbound-silence detection; handshake retransmit</span></div>
+          <div class="commit"><span class="hash">c47012f52</span><span class="msg"><strong>R9</strong> — continuous timestamps, <code>isPrepared()</code>, two stop-path fixes</span></div>
+          <div class="commit"><span class="hash">5b3d78c6b</span><span class="msg"><strong>R10</strong> — demote two log lines that fire on ordinary paths</span></div>
+          <div class="commit"><span class="hash">68b6a0a6c</span><span class="msg"><strong>R9</strong> (audio) — <code>forceContinuousTs</code> in <code>AudioEncoder.start</code></span></div>
+          <div class="commit"><span class="hash">383d55dfa</span><span class="msg"><strong>R17+R18</strong> — zero B-frames with vendor fallback; codec paired with profile</span></div>
+          <div class="commit"><span class="hash">79f2582be</span><span class="msg">docs — tick R6–R10, R17, R18</span></div>
+          <div class="commit"><span class="hash">6794feb0a</span><span class="msg"><strong>R12</strong> — byte counter, rollover push, visible write errors</span></div>
+          <div class="commit"><span class="hash">dabdccb17</span><span class="msg"><strong>R13</strong> — drop an incomplete RTMP parameter set instead of throwing</span></div>
+          <div class="commit"><span class="hash">12f5afaaf</span><span class="msg"><strong>R16</strong> — let the queued GL teardown finish before <code>start()</code></span></div>
+          <div class="commit"><span class="hash">cd89bb86b</span><span class="msg"><strong>R4+R15</strong> — one source-lifecycle flag, transactional starts, <code>warmSources</code></span></div>
+          <div class="commit"><span class="hash">f0ae47678</span><span class="msg"><strong>R19</strong> — coherent record codec; stream-encoder format listener</span></div>
+          <div class="commit"><span class="hash">9385e391d</span><span class="msg"><strong>R14 pt1</strong> — DTLS client role, ICE retransmit, socket teardown</span></div>
+          <div class="commit"><span class="hash">9283f343b</span><span class="msg"><strong>R14 pt2</strong> — 1200-byte cap, msid-semantic form, offer logging</span></div>
+          <div class="commit"><span class="hash">5677ced01</span><span class="msg">docs — close the checklist; correct R14's recorded scope</span></div>
+          <div class="commit"><span class="hash">1773819bb</span><span class="msg">docs — two-line branch and tag policy</span></div>
+        </div>
+      </div>
+    </details>
+
+    <details>
+      <summary><span class="htext"><span class="sec-eyebrow">Snapshot</span><h2>Published state</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody snap">
+        <h3>Remote refs, verified after push</h3>
+<pre><code>refs/heads/gpx-2.8      1773819bb   (new, 22 commits)
+refs/heads/gpx-master   0802b1120   (unchanged)
+tag 2.7.5-gpx25      -> 0802b1120   (unchanged)
+tag 2.8.0-gpx1       -> 1773819bb   (new)</code></pre>
+        <h3>Documents written</h3>
+        <ul class="clean">
+          <li><code>RootEncoder/.claude/gpx-branch-policy.md</code> — branch/tag tables, why the lines can't be swapped, four rules.</li>
+          <li><code>RootEncoder/.claude/gpx-reapply-plan-2.8.0.md</code> — R1–R22 checklist with hashes, dropped commits, R14 scope correction.</li>
+          <li><code>gpxstream-app/CLAUDE.md</code> — repinned to <code>2.8.0-gpx1</code> with the two-line constraint (commit <code>0086689</code>).</li>
+        </ul>
+      </div>
+    </details>
+
+    <details class="raw">
+      <summary><span class="htext"><span class="sec-eyebrow">For the record</span><h2>Full Record + AI Notes</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <p class="hint">Complete raw recap + Claude's scratch notes — the same canonical block the AI reads from the top of this file.</p>
+        <pre id="fullmd"></pre>
+      </div>
+    </details>
+  </div>
+  <footer><span>GPX Stream · Session Recap · 2026-07-31 22:22</span><span>Internal — RootEncoder</span></footer>
+  <script>document.getElementById('fullmd').textContent=document.getElementById('recap').textContent.trim();</script>
+</body>
+</html>
