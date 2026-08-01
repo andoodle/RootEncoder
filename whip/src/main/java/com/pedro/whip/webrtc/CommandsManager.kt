@@ -174,6 +174,9 @@ class CommandsManager {
         val body = createBody(
             videoSsrc, audioSsrc, uFrag, uPass, certificate.fingerprint
         )
+        // The offer is the only place to see what was actually negotiated with the ingest, and an
+        // SDP rejection is otherwise reported as an opaque HTTP status.
+        Log.i(TAG, "WHIP offer SDP:\n$body")
         this.certificate = certificate
         localSdpInfo = SdpInfo(uFrag, uPass, certificate.fingerprint, listOf())
         val uri = "${if (tlsEnabled) "https" else "http"}://$urlHost:$port/$path"
@@ -356,7 +359,10 @@ class CommandsManager {
                 "s=-\r\n" +
                 "t=0 0\r\n" +
                 "a=group:BUNDLE $bundleMids\r\n" +
-                "a=msid-semantic:WMS *\r\n" +
+                // "WMS" with no stream identifier: a Millicast ingest rejects the wildcard form.
+                "a=msid-semantic: WMS\r\n" +
+                // actpass leaves the DTLS role to the answer. WhipClient reads a=setup from the
+                // answer and takes the client role when the server answers passive.
                 "a=setup:actpass\r\n" +
                 "a=ice-ufrag:$uFrag\r\n" +
                 "a=ice-pwd:$uPass\r\n" +
