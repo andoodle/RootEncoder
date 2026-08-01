@@ -25,5 +25,8 @@ data class SdpInfo(
   val uFrag: String,
   val uPass: String,
   val fingerprint: String,
-  val candidates: List<Candidate>
+  val candidates: List<Candidate>,
+  // Remote DTLS role from a=setup: "active", "passive", "actpass" or null. Decides which side sends
+  // the DTLS ClientHello. Null for the locally built offer info.
+  val setupRole: String? = null
 )

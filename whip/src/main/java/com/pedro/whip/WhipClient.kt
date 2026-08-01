@@ -17,6 +17,7 @@ import com.pedro.common.toUInt32
 import com.pedro.common.validMessage
 import com.pedro.rtsp.utils.CryptoProperties
 import com.pedro.rtsp.utils.RtpConstants
+import com.pedro.whip.dtls.DtlsClient
 import com.pedro.whip.dtls.DtlsConnection
 import com.pedro.whip.dtls.DtlsTransport
 import com.pedro.whip.utils.Network
@@ -38,6 +39,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicLong
 import java.net.Inet6Address
 import java.net.URISyntaxException
 import java.nio.ByteBuffer
@@ -63,6 +65,16 @@ class WhipClient(private val connectChecker: ConnectChecker) {
     //for secure transport
     private var tlsEnabled = false
     private var dtlsConnection: DtlsConnection? = null
+    // Client-role DTLS handshaker, used when the server answers a=setup:passive.
+    private var dtlsClient: DtlsClient? = null
+    // The ICE and media UDP socket, held so disconnect() can close it. As a local inside the connect
+    // job, the blocking STUN read loop kept the socket alive after a stop and STUN kept flowing.
+    @Volatile
+    private var iceSocket: UdpStreamSocket? = null
+    // Counts media-plane packets received from the server after DTLS. For a send-only publisher these
+    // are the server's RTCP feedback, so their presence shows the ingest is receiving the stream
+    // rather than only holding the ICE session.
+    private val mediaPlaneIn = AtomicLong(0)
     private val commandsManager = CommandsManager()
     private val whipSender: WhipSender = WhipSender(connectChecker, commandsManager)
     private var url: String? = null
@@ -272,6 +284,9 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                     val port = remoteCandidates[0].getRealPort()
                     val socket = StreamSocket.createUdpSocket(socketType, host, port, socketTimeout, receiveSize = RtpConstants.MTU)
                     socket.connect()
+                    iceSocket = socket
+
+                    Log.i(TAG, "remote DTLS setup role: ${commandsManager.remoteSdpInfo?.setupRole}")
 
                     val requestId = commandsManager.generateTransactionId()
                     val userName = StunAttributeValueParser.createUserName(localFrag, remoteFrag)
@@ -282,20 +297,41 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                     )
                     commandsManager.writeStun(HeaderType.REQUEST, requestId, attributes, socket)
 
+                    // ICE binding check with retransmit. Sending one request and then blocking on
+                    // readStun means an ice-lite server that does not answer that single request
+                    // leaves the loop spinning on the server's own checks: it never nominates, never
+                    // reaches DTLS, and reports a connection with no media. Retransmit on a short
+                    // timeout, bounded, then fail with a message that says which step failed.
+                    val iceRtoMs = 500L
+                    val iceMaxAttempts = 14 // about 7 seconds
                     var candidateResponses = 0
                     var requestSuccessReceived = false
+                    var iceAttempts = 0
                     while (candidateResponses < 1 || !requestSuccessReceived) {
-                        val command = commandsManager.readStun(socket)
+                        val command = withTimeoutOrNull(iceRtoMs.milliseconds) { commandsManager.readStun(socket) }
+                        if (command == null) {
+                            if (++iceAttempts >= iceMaxAttempts) break
+                            commandsManager.writeStun(HeaderType.REQUEST, requestId, attributes, socket)
+                            continue
+                        }
                         if (command.header.id.contentEquals(requestId) && command.header.type == HeaderType.SUCCESS) {
                             requestSuccessReceived = true
                         } else if (command.header.type == HeaderType.REQUEST) {
                             candidateResponses++
                             val xorAddress = StunAttributeValueParser.createXorMappedAddress(command.header.id, host, port)
-                            val attributes = listOf(
+                            val responseAttributes = listOf(
                                 StunAttribute(AttributeType.XOR_MAPPED_ADDRESS, xorAddress)
                             )
-                            commandsManager.writeStun(HeaderType.SUCCESS, command.header.id, attributes, socket)
+                            commandsManager.writeStun(HeaderType.SUCCESS, command.header.id, responseAttributes, socket)
                         }
+                    }
+                    if (!requestSuccessReceived) {
+                        runCatching { socket.close() }
+                        iceSocket = null
+                        onMainThread {
+                            connectChecker.onConnectionFailed("ICE connectivity check failed (no STUN binding success from server)")
+                        }
+                        return@launch
                     }
 
                     val nominateId = commandsManager.generateTransactionId()
@@ -307,27 +343,50 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                     )
                     commandsManager.writeStun(HeaderType.REQUEST, nominateId, nominateAttributes, socket)
 
+                    // Same retransmit treatment for the USE-CANDIDATE nomination.
                     var nominateSuccessReceived = false
+                    var nominateAttempts = 0
                     while (!nominateSuccessReceived) {
-                        val command = commandsManager.readStun(socket)
+                        val command = withTimeoutOrNull(iceRtoMs.milliseconds) { commandsManager.readStun(socket) }
+                        if (command == null) {
+                            if (++nominateAttempts >= iceMaxAttempts) break
+                            commandsManager.writeStun(HeaderType.REQUEST, nominateId, nominateAttributes, socket)
+                            continue
+                        }
                         if (command.header.id.contentEquals(nominateId) && command.header.type == HeaderType.SUCCESS) {
                             nominateSuccessReceived = true
                         } else if (command.header.type == HeaderType.REQUEST) {
                             candidateResponses++
                             val xorAddress = StunAttributeValueParser.createXorMappedAddress(command.header.id, host, port)
-                            val attributes = listOf(
+                            val responseAttributes = listOf(
                                 StunAttribute(AttributeType.XOR_MAPPED_ADDRESS, xorAddress)
                             )
-                            commandsManager.writeStun(HeaderType.SUCCESS, command.header.id, attributes, socket)
+                            commandsManager.writeStun(HeaderType.SUCCESS, command.header.id, responseAttributes, socket)
                         }
+                    }
+                    if (!nominateSuccessReceived) {
+                        runCatching { socket.close() }
+                        iceSocket = null
+                        onMainThread {
+                            connectChecker.onConnectionFailed("ICE nomination failed (no STUN success for USE-CANDIDATE)")
+                        }
+                        return@launch
                     }
 
                     val certificate = commandsManager.certificate ?: return@launch
                     val fingerprint = commandsManager.remoteSdpInfo?.fingerprint ?: return@launch
 
+                    // Choose the DTLS role from the answer's a=setup. A WHIP ingest that answers
+                    // "passive" is the DTLS server, so this side is the client and sends the
+                    // ClientHello. Only an explicit "active" answer keeps the server-accept path.
+                    // Without this, both sides wait passive: no SRTP keys, so the connection reports
+                    // up and no media flows.
+                    val remoteSetup = commandsManager.remoteSdpInfo?.setupRole
+                    val weAreServer = remoteSetup.equals("active", ignoreCase = true)
+                    Log.i(TAG, "DTLS role: ${if (weAreServer) "server(accept)" else "client(connect)"} (remote a=setup:$remoteSetup)")
+
                     val dtlsResult = CompletableDeferred<Result<List<CryptoProperties>>>()
                     val dtlsTransport = DtlsTransport(socket)
-                    dtlsConnection = DtlsConnection(certificate, fingerprint)
 
                     val dispatchJob = launch {
                         while (isActive) {
@@ -339,14 +398,27 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                         }
                     }
 
-                    dtlsConnection?.start(dtlsTransport, object : DtlsConnection.Callback {
-                        override fun onHandshakeComplete(properties: List<CryptoProperties>) {
-                            dtlsResult.complete(Result.success(properties))
-                        }
-                        override fun onHandshakeFailed(reason: String?) {
-                            dtlsResult.complete(Result.failure(Exception(reason ?: "DTLS handshake failed")))
-                        }
-                    })
+                    if (weAreServer) {
+                        dtlsConnection = DtlsConnection(certificate, fingerprint)
+                        dtlsConnection?.start(dtlsTransport, object : DtlsConnection.Callback {
+                            override fun onHandshakeComplete(properties: List<CryptoProperties>) {
+                                dtlsResult.complete(Result.success(properties))
+                            }
+                            override fun onHandshakeFailed(reason: String?) {
+                                dtlsResult.complete(Result.failure(Exception(reason ?: "DTLS handshake failed")))
+                            }
+                        })
+                    } else {
+                        dtlsClient = DtlsClient(certificate, fingerprint)
+                        dtlsClient?.start(dtlsTransport, object : DtlsClient.Callback {
+                            override fun onHandshakeComplete(properties: List<CryptoProperties>) {
+                                dtlsResult.complete(Result.success(properties))
+                            }
+                            override fun onHandshakeFailed(reason: String?) {
+                                dtlsResult.complete(Result.failure(Exception(reason ?: "DTLS handshake failed")))
+                            }
+                        })
+                    }
 
                     val result = withTimeoutOrNull(5_000.milliseconds) { dtlsResult.await() }
                         ?: Result.failure(Exception("timeout"))
@@ -355,6 +427,10 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                         dispatchJob.cancel()
                         dtlsConnection?.close()
                         dtlsConnection = null
+                        dtlsClient?.close()
+                        dtlsClient = null
+                        runCatching { socket.close() }
+                        iceSocket = null
                         onMainThread {
                             connectChecker.onConnectionFailed("DTLS handshake failed: ${result.exceptionOrNull()?.message}")
                         }
@@ -363,7 +439,9 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                     Log.i(TAG, "dtls connected!!")
                     onMainThread { connectChecker.onConnectionSuccess() }
                     whipSender.setSocketsInfo(socket)
-                    whipSender.setCrypto(cryptoProperties[1])
+                    // The client writes with the client key at index 0; the server writes with the
+                    // server key at index 1.
+                    whipSender.setCrypto(if (weAreServer) cryptoProperties[1] else cryptoProperties[0])
                     whipSender.start()
                 }.exceptionOrNull()
                 if (error != null) {
@@ -387,7 +465,12 @@ class WhipClient(private val connectChecker: ConnectChecker) {
         val first = bytes[0].toInt() and 0xFF
         when (first) {
             in 20..63 -> dtlsTransport.enqueue(bytes)
-            in 128..191 -> { /* RTP/RTCP – ignore after DTLS */ }
+            in 128..191 -> {
+                // RTP and RTCP are not consumed by a send-only publisher, but they are counted:
+                // feedback arriving here means the server is receiving the stream. Log throttled.
+                val n = mediaPlaneIn.incrementAndGet()
+                if (n <= 5L || n % 50L == 0L) Log.i(TAG, "media-plane in from server: $n")
+            }
             else -> {
                 try {
                     val command = commandsManager.readStun(bytes)
@@ -416,6 +499,13 @@ class WhipClient(private val connectChecker: ConnectChecker) {
         if (isStreaming) whipSender.stop()
         dtlsConnection?.close()
         dtlsConnection = null
+        dtlsClient?.close()
+        dtlsClient = null
+        // Close the ICE and media UDP socket so an in-flight STUN read unblocks and the OS stops
+        // answering the server's binding checks. Without this the connect job's read loop kept STUN
+        // alive after a stop and the server-side session lingered.
+        runCatching { iceSocket?.close() }
+        iceSocket = null
         val error = runCatching {
             withTimeoutOrNull(100.milliseconds) {
                 commandsManager.writeDelete()

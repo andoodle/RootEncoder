@@ -29,12 +29,16 @@ object SdpParser {
     val uPass = extractContent(body, "a=ice-pwd:")
     val fingerprint = extractContent(body, "a=fingerprint:sha-256")
     val candidates = extractCandidates(body)
-    return SdpInfo(uFrag, uPass, fingerprint, candidates)
+    // Read the remote DTLS role so the client can decide which side sends the ClientHello.
+    val setupRole = extractContent(body, "a=setup:").ifEmpty { null }
+    return SdpInfo(uFrag, uPass, fingerprint, candidates, setupRole)
   }
 
   private fun extractContent(sdp: String, content: String): String {
+    // lastOrNull, not last: an error answer that lacks a field then fails downstream as an empty
+    // value rather than throwing NoSuchElementException out of parseBodyAnswer.
     return sdp.lines()
-      .map { it.trim() }.last { it.startsWith(content, ignoreCase = true) }.removePrefix(content).trim()
+      .map { it.trim() }.lastOrNull { it.startsWith(content, ignoreCase = true) }?.removePrefix(content)?.trim() ?: ""
   }
 
   private fun extractCandidates(sdp: String): List<Candidate> {
