@@ -12,15 +12,15 @@ later items depend on earlier ones.
 - [x] R1 — CodecUtil `isCBRModeSupported` null guard (debug logs and the copy-paste bug excluded) — `62d7009e8`
 - [x] R2 — VideoEncoder forced-VBR bitrate mode + `setTryForceVBRBitrateMode` — `3751dc648`
 - [x] R3 — VideoEncoder prepend SPS/PPS to IDR frames (seekable VOD) — `3751dc648`
-- [ ] R3b — VideoEncoderHelper hvcC csd-0 parsing + start-code ordering bounds check (found during R2; was not in the original item list)
-- [ ] R4 — StreamBase keyframe on `startStream()` and on `startRecord()`
-- [ ] R5 — `takePhoto(width, height, callback)` overload (GlInterface, GlStreamInterface, OpenGlView)
+- [x] R3b — VideoEncoderHelper hvcC csd-0 parsing + start-code ordering bounds check (found during R2; was not in the original item list) — `90b3fc502`
+- [ ] R4 — StreamBase keyframe on `startStream()` and on `startRecord()` — folded into the StreamBase block, see below
+- [x] R5 — `takePhoto(width, height, callback)` overload (GlInterface, GlStreamInterface, OpenGlView) — `614488cd2`
 - [ ] R6 — FlvMuxerRecordController AVCC SPS/PPS fallback
 - [ ] R7 — SRT inbound-silence dead-link detection + `getInboundSilenceMs`
 - [ ] R8 — SRT handshake retransmit with backoff
 - [ ] R9 — Encoder continuous timestamps across stop/start
 - [ ] R10 — Log-noise reduction (ImageStreamObject, SurfaceManager, BaseEncoder cold start)
-- [ ] R11 — Stream-only overlay plane + live force-render toggle (slate)
+- [x] R11 — Stream-only overlay plane + live force-render toggle (slate) — `10d264057`
 - [ ] R12 — Writer-side byte counter, rollover push, visible write errors
 - [ ] R13 — RtmpSender guard against an incomplete H265/H264 parameter set
 - [ ] R14 — WHIP/Millicast stack (largest item; see below)
@@ -31,6 +31,27 @@ later items depend on earlier ones.
 - [ ] R19 — Record codec applied coherently on a prepared encoder (redesign, see below)
 - [ ] R20 — Build green (`gradlew assembleDebug`)
 - [ ] R21 — Tag `2.8.0-gpx1`, push branch and tag
+
+## Two plan revisions made while applying R1–R11
+
+**The StreamBase items are one block, not six.** R4 (keyframes on start), R9 (continuous
+timestamps), R15 (`warmSources`), R18 (per-encoder profile/level) and R19 (record codec) all
+live inside `library/src/main/java/com/pedro/library/base/StreamBase.kt` and reference each
+other's fields. The old branch also carried three further StreamBase changes that were not on
+the original item list: a `sourcesRunning` flag that makes `startSources`/`stopSources`
+idempotent and transactional, an `isOnPreview` ordering fix in `startPreview`, and a
+stream-encoder `MediaFormat` listener (`setStreamVideoFormatListener` /
+`getLastStreamVideoFormat`). These are applied as one grouped set of commits against that file
+rather than as separate re-applies.
+
+**Comments are compressed as they are re-applied.** The old branch's StreamBase carries roughly
+200 lines of doc comment that narrate the fork's own history — "Until gpxnative-ai#282 there
+was...", "previously both startStream's catch...", "Moved AFTER the reset" — and cite session
+and issue numbers that cannot be looked up from this repository. The durable facts inside them
+are kept: that `MediaCodecInfo.CodecProfileLevel` constants are codec-namespaced so one pair
+cannot serve two codecs, why each field is `@Volatile`, why the muxer label is advanced only
+after the prepare that realises it, and why a replay may clear but never set the
+prepared-codec claim. The narration around those facts is dropped.
 
 ## Old commits deliberately not re-applied
 
