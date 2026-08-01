@@ -1,4 +1,4 @@
-# GPX fork re-apply onto upstream 2.8.0+ (branch `gpx-master-280`)
+# GPX fork re-apply onto upstream 2.8.0+ (branch `gpx-2.8`)
 
 Base: `origin/master` @ `9a9ca124f` (pedroSG94 master, 2026-07-30).
 Superseded branch: `gpx-master` @ `0802b1120` (base was `49421b686`, 2026-07-20).
@@ -13,7 +13,7 @@ later items depend on earlier ones.
 - [x] R2 — VideoEncoder forced-VBR bitrate mode + `setTryForceVBRBitrateMode` — `3751dc648`
 - [x] R3 — VideoEncoder prepend SPS/PPS to IDR frames (seekable VOD) — `3751dc648`
 - [x] R3b — VideoEncoderHelper hvcC csd-0 parsing + start-code ordering bounds check (found during R2; was not in the original item list) — `90b3fc502`
-- [ ] R4 — StreamBase keyframe on `startStream()` and on `startRecord()` — folded into the StreamBase block, see below
+- [x] R4 — StreamBase keyframe on `startStream()` and on `startRecord()` — `cd89bb86b`
 - [x] R5 — `takePhoto(width, height, callback)` overload (GlInterface, GlStreamInterface, OpenGlView) — `614488cd2`
 - [x] R6 — FlvMuxerRecordController AVCC SPS/PPS fallback — `f594eef93`
 - [x] R7 — SRT inbound-silence dead-link detection + `getInboundSilenceMs` — `a7bbe6a63`
@@ -21,16 +21,49 @@ later items depend on earlier ones.
 - [x] R9 — Encoder continuous timestamps across stop/start — `c47012f52` (BaseEncoder, VideoEncoder), `68b6a0a6c` (AudioEncoder)
 - [x] R10 — Log-noise reduction (ImageStreamObject, SurfaceManager, BaseEncoder cold start) — `5b3d78c6b`; the BaseEncoder part is the `codecStarted` flush gate in `c47012f52`
 - [x] R11 — Stream-only overlay plane + live force-render toggle (slate) — `10d264057`
-- [ ] R12 — Writer-side byte counter, rollover push, visible write errors
-- [ ] R13 — RtmpSender guard against an incomplete H265/H264 parameter set
-- [ ] R14 — WHIP/Millicast stack (largest item; see below)
-- [ ] R15 — `warmSources()` seam on StreamBase
-- [ ] R16 — `stop()` GL cleanup race fix
+- [x] R12 — Writer-side byte counter, rollover push, visible write errors — `6794feb0a`
+- [x] R13 — RtmpSender guard against an incomplete H265/H264 parameter set — `dabdccb17`
+- [x] R14 — WHIP/Millicast stack — `9385e391d` (part 1), `9283f343b` (part 2). Smaller than the old commit titles suggest; see the correction below.
+- [x] R15 — `warmSources()` seam on StreamBase — `cd89bb86b`
+- [x] R16 — `stop()` GL cleanup race fix — `12f5afaaf`
+- [x] R16b — GenericStream unsupported-protocol message includes the endpoint — part of `9283f343b`
 - [x] R17 — Zero B-frames request with vendor-rejection fallback — `383d55dfa`
 - [x] R18 — Per-encoder profile/level + negotiated-format seam — `383d55dfa` (VideoEncoder half; the StreamBase `prepareVideo` parameters are still open)
-- [ ] R19 — Record codec applied coherently on a prepared encoder (redesign, see below)
-- [ ] R20 — Build green (`gradlew assembleDebug`)
-- [ ] R21 — Tag `2.8.0-gpx1`, push branch and tag
+- [x] R19 — Record codec applied coherently on a prepared encoder (redesign, see below) — `f0ae47678`
+- [x] R20 — Build green (`gradlew assembleDebug` plus `test` across all modules)
+- [ ] R21 — Tag `2.8.0-gpx1`, push branch and tag — awaiting owner approval
+- [ ] R22 — Record the two-line branch policy in this repo and in `gpxstream-app/CLAUDE.md`
+
+## Correction to R14's scope
+
+The original item list described R14 from the old branch's commit titles, which overstated
+what survives. Three of those changes are not in the old branch's final tree at all:
+
+- **HTTPS with Bearer auth and the `?auth=` token parameter** reached upstream independently.
+  `whip/webrtc/CommandsManager.kt` on `origin/master` already sends
+  `Authorization: Bearer $token`, identically to `gpx-master`. The old branch's own commit
+  `5d3148119` is titled "WHIP minimal Millicast fix + pedro upstream auth", which is that
+  handover.
+- **`transport-cc` and MID RTP header extensions** appear in commit `84d19931c` but a grep for
+  `extmap` or `transport-cc` across `gpx-master`'s `rtsp/`, `whip/` and `library/` trees returns
+  nothing outside a code comment. A later commit removed them.
+- **H264 `profile-level-id`, `msid` and port 9** (commit `74eb7c2e5`) are likewise absent from
+  the old branch's final `CommandsManager.kt`.
+
+What actually survives, and is therefore what was re-applied: the DTLS client role and
+`DtlsClient.kt`, the ICE binding-check and nomination retransmits, the held ICE socket closed on
+disconnect, `a=setup` parsing into `SdpInfo.setupRole`, `lastOrNull` in `SdpParser`, the
+1200-byte packet cap, `a=msid-semantic: WMS` without the wildcard, and the offer-SDP log.
+
+## Verification status
+
+`gradlew assembleDebug test` passes across every module and the sample app. Nothing in this
+branch has been run on a device or against a live ingest. The WHIP behaviour above was
+originally established by testing against Dolby and Millicast; it is re-derived here and not
+re-proven.
+
+File-coverage check: every file the old branch changed (excluding its session-recap HTML) is
+also changed on this branch, and this branch changes no other files.
 
 ## Two plan revisions made while applying R1–R11
 
