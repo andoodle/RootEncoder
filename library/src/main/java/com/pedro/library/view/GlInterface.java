@@ -71,6 +71,15 @@ public interface GlInterface {
   void takePhoto(TakePhotoCallback takePhotoCallback);
 
   /**
+   * Capture an Image from Opengl at an explicit size instead of the encoder size.
+   *
+   * @param width pixel width of the returned bitmap.
+   * @param height pixel height of the returned bitmap.
+   * @param takePhotoCallback callback where you will get your image like a bitmap.
+   */
+  void takePhoto(int width, int height, TakePhotoCallback takePhotoCallback);
+
+  /**
    * Replaces the filter at the specified position with the specified filter.
    * You can modify filter's parameters after set it to stream.
    *

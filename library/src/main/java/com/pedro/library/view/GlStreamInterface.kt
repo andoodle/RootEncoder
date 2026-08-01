@@ -72,6 +72,10 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
   private var encoderHeight = 0
   private var encoderRecordWidth = 0
   private var encoderRecordHeight = 0
+  // Size the next photo capture renders and reads back at. The one-argument takePhoto sets it to
+  // the encoder size, so a caller that does not ask for a size keeps the encoder size.
+  private var photoWidth = 0
+  private var photoHeight = 0
   private var streamOrientation = 0
   private var previewOrientation = 0
   private var previewWidth = 0
@@ -182,6 +186,14 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
 
   override fun takePhoto(takePhotoCallback: TakePhotoCallback?) {
     this.takePhotoCallback = takePhotoCallback
+    this.photoWidth = encoderWidth
+    this.photoHeight = encoderHeight
+  }
+
+  override fun takePhoto(width: Int, height: Int, takePhotoCallback: TakePhotoCallback?) {
+    this.takePhotoCallback = takePhotoCallback
+    this.photoWidth = width
+    this.photoHeight = height
   }
 
   override fun start() {
@@ -313,9 +325,9 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
     //render surface photo if request photo
     if (takePhotoCallback != null && surfaceManagerPhoto.isReady && mainRender.isReady()) {
       if (surfaceManagerPhoto.makeCurrent()) {
-        mainRender.drawScreen(encoderWidth, encoderHeight, AspectRatioMode.NONE,
+        mainRender.drawScreen(photoWidth, photoHeight, AspectRatioMode.NONE,
           streamOrientation, isStreamVerticalFlip, isStreamHorizontalFlip, streamViewPort)
-        takePhotoCallback?.onTakePhoto(GlUtil.getBitmap(encoderWidth, encoderHeight))
+        takePhotoCallback?.onTakePhoto(GlUtil.getBitmap(photoWidth, photoHeight))
         takePhotoCallback = null
         surfaceManagerPhoto.swapBuffer()
       }
