@@ -73,6 +73,10 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   private int level = -1;
   private final SpsColorPatcher spsColorPatcher = new SpsColorPatcher();
   private boolean forceBt709Color = false;
+  // When set, the next prepareVideoEncoder asks for VBR instead of CBR. The record encoder wants
+  // VBR so a recorded file spends bits where the picture needs them; the stream encoder wants CBR
+  // so the link sees a flat rate.
+  private boolean tryForceVBRBitrateMode = false;
 
   public VideoEncoder(GetVideoData getVideoData) {
     this.getVideoData = getVideoData;
@@ -156,6 +160,11 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
       } else {
         Log.i(TAG, "bitrate mode CBR not supported using default mode");
       }
+      if (tryForceVBRBitrateMode && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+        Log.i(TAG, "set bitrate mode VBR (forced)");
+        videoFormat.setInteger(MediaFormat.KEY_BITRATE_MODE,
+            MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR);
+      }
       // Rotation by encoder.
       // Removed because this is ignored by most encoders, producing different results on different devices
       //  videoFormat.setInteger(MediaFormat.KEY_ROTATION, rotation);
@@ -167,6 +176,13 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
       if (this.level > 0) {
         // MediaFormat.KEY_LEVEL, API > 23
         videoFormat.setInteger("level", this.level);
+      }
+      // Ask the encoder to repeat SPS/PPS ahead of every IDR frame. A recorded file is then
+      // decodable from any keyframe rather than only from its first frame, which is what makes
+      // clip extraction at a keyframe boundary produce a playable file. Encoders that do not know
+      // the key ignore it.
+      if (type == VideoCodec.H264 || type == VideoCodec.H265) {
+        videoFormat.setInteger("prepend-sps-pps-to-idr-frames", 1);
       }
       // Set BT.709 color metadata so the encoder embeds correct VUI in the SPS NAL unit.
       // Without this, devices default to smpte170m/bt470bg which ffprobe/players read incorrectly.
@@ -278,6 +294,14 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
         forceKey = true;
       }
     }
+  }
+
+  /**
+   * Request VBR instead of CBR on the next prepareVideoEncoder. Has no effect on an encoder that
+   * is already prepared.
+   */
+  public void setTryForceVBRBitrateMode(boolean tryForceVBRBitrateMode) {
+    this.tryForceVBRBitrateMode = tryForceVBRBitrateMode;
   }
 
   public Surface getInputSurface() {
