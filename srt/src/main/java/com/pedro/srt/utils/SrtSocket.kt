@@ -39,6 +39,8 @@ class SrtSocket(type: SocketType, host: String, port: Int, timeout: Long) {
 
   fun isReachable() = socket.isReachable()
 
+  fun setReadTimeout(timeoutMs: Long) = socket.setReadTimeout(timeoutMs)
+
   suspend fun write(srtPacket: SrtPacket) {
     val buffer = srtPacket.getData()
     socket.write(buffer)

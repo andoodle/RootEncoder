@@ -59,6 +59,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
+import java.net.SocketTimeoutException
 import java.net.URISyntaxException
 import java.nio.ByteBuffer
 
@@ -68,6 +69,19 @@ import java.nio.ByteBuffer
 class SrtClient(private val connectChecker: ConnectChecker) {
 
   private val TAG = "SrtClient"
+
+  // Handshake retransmit backoff, in milliseconds, and also the socket read timeout during the
+  // handshake, which sets the poll granularity.
+  //
+  // Sending each handshake once and block-reading the whole latency-derived socketTimeout makes one
+  // lost UDP packet cost the entire window, which surfaces as "Poll timed out". Re-knocking fixes
+  // that, and the gap grows rather than staying fixed because two failure modes pull opposite ways.
+  // A cold lost packet wants a fast re-knock, within about 250 ms. A server holding a prior session
+  // after a relaunch releases it during a lull: continuous 250 ms knocking was observed riding an
+  // 11 s window with no response, and the knock that latched was the one after a multi-second
+  // silent gap. Growing the gap covers the lost packet early and provides the quiet windows later.
+  private val HANDSHAKE_RETRANSMIT_MS = 250L
+  private val HANDSHAKE_RETRANSMIT_CAP_MS = 2_000L
 
   private val validSchemes = arrayOf("srt")
 
@@ -80,6 +94,23 @@ class SrtClient(private val connectChecker: ConnectChecker) {
   private var jobRetry: Job? = null
 
   private var checkServerAlive = false
+
+  // Wall-clock time the last packet was read from the socket. A silent UDP blackhole keeps sendto()
+  // succeeding, so the outbound byte counter keeps climbing while the server stops responding and
+  // nothing reports a failure. This reads SRT's own control traffic (ACK and KeepAlive arrive
+  // sub-second at any latency) rather than ICMP, so a firewall that drops ICMP does not blind it.
+  @Volatile
+  private var lastInboundMs = 0L
+  private var inboundSilenceJob: Job? = null
+
+  // Inbound-silence dead-link timeout. Fixed rather than scaled with latency: an ingest server that
+  // drops the publisher at a fixed interval cannot be ridden through by waiting longer, and scaling
+  // with latency only delays detection. 5,500 ms sits above an observed 5 s server-side drop, which
+  // still rides through shorter blips. Checked on its own 1 s tick rather than inside the
+  // multi-second readBuffer loop, so detection does not wait for the next socket read to wake.
+  private val inboundSilenceTimeoutMs = 5_500L
+  private val inboundSilenceTickMs = 1_000L
+
   @Volatile
   var isStreaming = false
     private set
@@ -210,8 +241,14 @@ class SrtClient(private val connectChecker: ConnectChecker) {
 
         val host = urlParser.host
         val port = urlParser.port ?: 8888
-        val path = urlParser.getQuery("streamid") ?: urlParser.path
+        // getFullPath(), not path: it keeps the query string attached, which is what a Millicast SRT
+        // ingest expects as the streamid when the publishing token rides in the URL as "?t=".
+        val path = urlParser.getQuery("streamid") ?: urlParser.getFullPath()
         commandsManager.latency = urlParser.getQuery("latency")?.toIntOrNull() ?: commandsManager.latency
+        // Re-derive the socket read timeout from the URL latency on every connect. A host app that
+        // sets socketTimeout once at configure time leaves it stale after a latency change plus a
+        // reconnect. latency is microseconds, socketTimeout is milliseconds.
+        socketTimeout = (commandsManager.latency / 1000L) + 1000L
         val passphrase = urlParser.getQuery("passphrase") ?: ""
         if (passphrase.isNotEmpty() && passphrase.length in 10..79) {
           val encryptionType = when (urlParser.getQuery("pbkeylen")?.toIntOrNull()) {
@@ -231,14 +268,21 @@ class SrtClient(private val connectChecker: ConnectChecker) {
         commandsManager.host = host
 
         val error = runCatching {
-          socket = SrtSocket(socketType, host, port, socketTimeout)
+          // Short read timeout during the handshake so a missed reply re-knocks on the retransmit
+          // cadence instead of blocking the whole latency window on one packet.
+          socket = SrtSocket(socketType, host, port, HANDSHAKE_RETRANSMIT_MS)
           socket?.connect()
           commandsManager.loadStartTs()
 
-          commandsManager.writeHandshake(socket)
-          val response = commandsManager.readHandshake(socket)
+          // Total knock budget equals the latency-derived socketTimeout that the single block-read
+          // used to consume; the retransmits happen inside that same window.
+          val handshakeDeadlineMs = System.currentTimeMillis() + socketTimeout
 
-          commandsManager.writeHandshake(socket, response.copy(
+          val response = pollHandshake(handshakeDeadlineMs, "induction") {
+            commandsManager.writeHandshake(socket)
+          } ?: throw SocketTimeoutException("Poll timed out (no induction response in ${socketTimeout}ms)")
+
+          val conclusion = response.copy(
             encryption = commandsManager.getEncryptType(),
             extensionField = ExtensionField.calculateValue(response.extensionField, commandsManager.encryptionEnabled(), path.isNotEmpty()),
             handshakeType = HandshakeType.CONCLUSION,
@@ -250,8 +294,12 @@ class SrtClient(private val connectChecker: ConnectChecker) {
               senderDelay = commandsManager.latency,
               path = path,
               encryptInfo = commandsManager.getEncryptInfo()
-            )))
-          val responseConclusion = commandsManager.readHandshake(socket)
+            ))
+          // Accept only CONCLUSION here, so an INDUCTION echo buffered from an earlier retransmit is
+          // skipped rather than mistaken for the reply.
+          val responseConclusion = pollHandshake(handshakeDeadlineMs, "conclusion", HandshakeType.CONCLUSION) {
+            commandsManager.writeHandshake(socket, conclusion)
+          } ?: throw SocketTimeoutException("Poll timed out (no conclusion response in ${socketTimeout}ms)")
           if (responseConclusion.isErrorType()) {
             onMainThread {
               connectChecker.onConnectionFailed("Error configure stream, ${responseConclusion.handshakeType.name}")
@@ -261,11 +309,15 @@ class SrtClient(private val connectChecker: ConnectChecker) {
             commandsManager.socketId = responseConclusion.srtSocketId
             commandsManager.MTU = responseConclusion.MTU
             commandsManager.sequenceNumber = responseConclusion.initialPacketSequence
+            // Handshake done: restore the latency-derived read timeout for the streaming read loop.
+            socket?.setReadTimeout(socketTimeout)
             onMainThread {
               connectChecker.onConnectionSuccess()
             }
             srtSender.socket = socket
             srtSender.start()
+            lastInboundMs = System.currentTimeMillis()
+            startInboundSilenceWatchdog()
             handleServerPackets()
           }
         }.exceptionOrNull()
@@ -275,6 +327,79 @@ class SrtClient(private val connectChecker: ConnectChecker) {
             connectChecker.onConnectionFailed("Error configure stream, ${error.validMessage()}")
           }
           return@launch
+        }
+      }
+    }
+  }
+
+  /**
+   * Send a handshake through [send] and poll for its reply, retransmitting on a growing gap until a
+   * usable reply arrives or [deadlineMs] passes.
+   *
+   * [acceptType] gates which reply ends the loop; handshakes of other types are skipped, so an
+   * INDUCTION echo left in the socket buffer by an earlier retransmit does not end the conclusion
+   * phase. An error-type handshake always ends the loop so a server rejection reaches the caller.
+   * Pass null to accept the first handshake of any type.
+   *
+   * Re-sending is driven by elapsed time rather than by each read returning, so a stray
+   * non-handshake datagram — which [CommandsManager.readHandshake] throws on — is drained and
+   * skipped while the knock stays on its own schedule, instead of aborting the connect.
+   *
+   * @return the accepted handshake, or null if the deadline passed first
+   */
+  private suspend fun pollHandshake(
+    deadlineMs: Long,
+    phase: String,
+    acceptType: HandshakeType? = null,
+    send: suspend () -> Unit,
+  ): Handshake? {
+    var lastSendMs = 0L
+    var gapMs = HANDSHAKE_RETRANSMIT_MS
+    while (scope.isActive && System.currentTimeMillis() < deadlineMs) {
+      val now = System.currentTimeMillis()
+      if (lastSendMs == 0L || now - lastSendMs >= gapMs) {
+        send()
+        if (lastSendMs != 0L) gapMs = (gapMs * 2).coerceAtMost(HANDSHAKE_RETRANSMIT_CAP_MS)
+        lastSendMs = now
+      }
+      val handshake = try {
+        commandsManager.readHandshake(socket)
+      } catch (_: SocketTimeoutException) {
+        continue // read window elapsed with no reply; the loop re-knocks once the gap has passed
+      } catch (e: IOException) {
+        if (e.message?.contains("unexpected response type") != true) throw e
+        Log.i(TAG, "skip non-handshake packet during $phase: ${e.message}")
+        continue
+      }
+      if (acceptType == null || handshake.isErrorType() || handshake.handshakeType == acceptType) {
+        return handshake
+      }
+      Log.i(TAG, "skip stale $phase handshake: ${handshake.handshakeType.name}")
+    }
+    return null
+  }
+
+  /**
+   * Report the link dead once no packet has been read for [inboundSilenceTimeoutMs].
+   *
+   * Runs on its own [inboundSilenceTickMs] tick rather than inside the readBuffer loop, whose block
+   * can last multiple seconds, so the report does not wait for the next socket read to wake. This
+   * replaces the ICMP probe in [checkServerAlive] for the blackhole case, where sendto() keeps
+   * succeeding and the outbound counter keeps climbing while nothing comes back.
+   */
+  private fun startInboundSilenceWatchdog() {
+    inboundSilenceJob?.cancel()
+    inboundSilenceJob = scope.launch {
+      while (isActive && isStreaming) {
+        delay(inboundSilenceTickMs)
+        if (lastInboundMs == 0L) continue
+        val silentMs = System.currentTimeMillis() - lastInboundMs
+        if (silentMs > inboundSilenceTimeoutMs) {
+          onMainThread {
+            connectChecker.onConnectionFailed("No response from server (inbound silence ${silentMs}ms > ${inboundSilenceTimeoutMs}ms)")
+          }
+          scope.cancel()
+          break
         }
       }
     }
@@ -365,6 +490,8 @@ class SrtClient(private val connectChecker: ConnectChecker) {
   @Throws(IOException::class)
   private suspend fun handleMessages() {
     val responseBufferConclusion = socket?.readBuffer() ?: throw IOException("read buffer failed, socket disconnected")
+    // A packet arrived, so the server is responding. Reset the silence timer.
+    lastInboundMs = System.currentTimeMillis()
     when(val srtPacket = SrtPacket.getSrtPacket(responseBufferConclusion)) {
       is DataPacket -> {
         //ignore
@@ -482,6 +609,16 @@ class SrtClient(private val connectChecker: ConnectChecker) {
   }
 
   fun getItemsInCache(): Int = srtSender.getItemsInCache()
+
+  /**
+   * Milliseconds since the last inbound packet was read from the socket, or -1 when not streaming or
+   * not yet established. On a responding link this stays near zero, because SRT sends ACK and
+   * KeepAlive control packets sub-second at any latency, and it grows once the server stops
+   * responding. An outbound bytes-sent counter cannot show this, since sendto() keeps succeeding
+   * into a blackhole.
+   */
+  fun getInboundSilenceMs(): Long =
+    if (!isStreaming || lastInboundMs == 0L) -1L else System.currentTimeMillis() - lastInboundMs
 
   /**
    * @param factor values from 0.1f to 1f

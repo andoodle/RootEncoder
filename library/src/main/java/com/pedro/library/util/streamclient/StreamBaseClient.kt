@@ -51,6 +51,11 @@ abstract class StreamBaseClient {
   abstract fun clearCache()
   abstract fun getCacheSize(): Int
   abstract fun getItemsInCache(): Int
+  /**
+   * Milliseconds since the last inbound packet was read from the transport socket. SRT reports a
+   * real value; protocols that do not track this return -1.
+   */
+  open fun getInboundSilenceMs(): Long = -1L
   abstract fun getSentAudioFrames(): Long
   abstract fun getSentVideoFrames(): Long
   abstract fun getBytesSend(): Long
