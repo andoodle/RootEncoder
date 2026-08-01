@@ -63,6 +63,42 @@ abstract class AsyncBaseRecordController : RecordController {
   private var muxerChannel: Channel<MediaFrame>? = null
   private var muxerJob: Job? = null
 
+  // Writer-side byte accounting. The muxer counts every byte it writes through countBytesWritten,
+  // so a caller reads the exact current file size from memory rather than polling File.length(), and
+  // receives one push at the rollover threshold rather than sampling for the crossing.
+  @Volatile
+  private var bytesWritten: Long = 0
+  @Volatile
+  private var rolloverThresholdBytes: Long = 0
+  @Volatile
+  private var rolloverNotified = false
+  @Volatile
+  private var rolloverCallback: ((totalBytes: Long) -> Unit)? = null
+
+  /** Bytes written to the current recording so far; 0 when idle or just started. */
+  fun getBytesWritten(): Long = bytesWritten
+
+  /**
+   * Arm a one-shot rollover push. [callback] fires once, on the muxer thread, when the byte count
+   * crosses [thresholdBytes]. A threshold of 0 or less disarms it. Re-armed on the next start.
+   */
+  fun setRolloverThreshold(thresholdBytes: Long, callback: ((totalBytes: Long) -> Unit)?) {
+    rolloverThresholdBytes = thresholdBytes
+    rolloverCallback = callback
+  }
+
+  /** Subclasses call this for every byte batch actually written to the output. */
+  protected fun countBytesWritten(count: Int) {
+    if (count <= 0) return
+    val total = bytesWritten + count
+    bytesWritten = total
+    val threshold = rolloverThresholdBytes
+    if (!rolloverNotified && threshold > 0 && total >= threshold) {
+      rolloverNotified = true
+      rolloverCallback?.invoke(total)
+    }
+  }
+
   override fun setRequestKeyFrame(requestKeyFrame: RequestKeyFrame?) {
     this.myRequestKeyFrame = requestKeyFrame
   }
@@ -173,6 +209,8 @@ abstract class AsyncBaseRecordController : RecordController {
     tracks: RecordTracks
   ) {
     clearTimestamp()
+    bytesWritten = 0
+    rolloverNotified = false
     muxerChannel = Channel(CAPACITY)
     muxerJob = scope.launch {
       val channel = muxerChannel ?: return@launch

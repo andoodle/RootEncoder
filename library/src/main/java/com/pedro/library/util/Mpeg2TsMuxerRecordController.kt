@@ -56,6 +56,8 @@ class Mpeg2TsMuxerRecordController : AsyncBaseRecordController() {
   private var sampleRate = 0
   private var isStereo = true
   private var sendInfo = false
+  @Volatile
+  private var writeErrorNotified = false
 
   @Throws(IOException::class)
   override fun startRecordImp(
@@ -79,6 +81,7 @@ class Mpeg2TsMuxerRecordController : AsyncBaseRecordController() {
 
   @Throws(IOException::class)
   private fun start(listener: RecordController.Listener?, tracks: RecordTracks) {
+    writeErrorNotified = false
     audioPacket = when (getAudioCodec()) {
       AudioCodec.AAC, AudioCodec.HE_AAC -> AacPacket(limitSize, psiManager).apply { sendAudioInfo(sampleRate, isStereo, getAudioCodec()) }
       AudioCodec.OPUS -> OpusPacket(limitSize, psiManager)
@@ -149,9 +152,20 @@ class Mpeg2TsMuxerRecordController : AsyncBaseRecordController() {
       outputStream?.let { outputStream ->
         mpegTsPackets.forEach { mpegTsPacket ->
           outputStream.write(mpegTsPacket.buffer)
+          // Every byte that reaches the file passes through here -- PSI, video and audio alike --
+          // so getBytesWritten() is the exact size of the file on disk.
+          countBytesWritten(mpegTsPacket.buffer.size)
         }
       }
-    } catch (_: Exception) { }
+    } catch (e: Exception) {
+      // A write failure has to be visible. Swallowing it meant a wedged or full disk recorded
+      // nothing for the rest of the session with no report. First failure only, because a dead
+      // output fails once per frame.
+      if (!writeErrorNotified) {
+        writeErrorNotified = true
+        listener?.onError(e)
+      }
+    }
   }
 
   override suspend fun onWriteFrame(frame: MediaFrame) {
