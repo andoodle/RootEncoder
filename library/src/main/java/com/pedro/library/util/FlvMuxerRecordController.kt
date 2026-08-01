@@ -3,6 +3,7 @@ package com.pedro.library.util
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.util.Log
+import android.util.Pair
 import com.pedro.common.AudioCodec
 import com.pedro.common.VideoCodec
 import com.pedro.common.frame.MediaFrame
@@ -121,8 +122,9 @@ class FlvMuxerRecordController: AsyncBaseRecordController() {
             if (!sendInfo) {
                 when (videoPacket) {
                     is H264Packet -> {
-                        val buffers =
+                        val buffers: Pair<ByteBuffer, ByteBuffer>? =
                             VideoEncoderHelper.decodeSpsPpsFromBuffer(buffer.duplicate(), info.size)
+                                ?: extractSpsPpsFromAvcc(buffer.duplicate(), info.size)
                         if (buffers != null) {
                             Log.i(TAG, "manual sps/pps extraction success")
                             val oldSps = buffers.first
@@ -179,6 +181,53 @@ class FlvMuxerRecordController: AsyncBaseRecordController() {
             myRequestKeyFrame?.onRequestKeyFrame()
             myRequestKeyFrame = null
         }
+    }
+
+    /**
+     * Read SPS and PPS out of an AVCC-framed keyframe: a sequence of [4-byte big-endian length]
+     * [NAL] units, where NAL header type 7 is SPS and 8 is PPS. Returned with Annex-B start codes
+     * prepended, matching what decodeSpsPpsFromBuffer returns for Annex-B input.
+     *
+     * Runs only when decodeSpsPpsFromBuffer found no Annex-B start code, which is what an encoder
+     * emitting AVCC produces.
+     *
+     * @return sps and pps, or null if either is absent or a length field runs past the buffer
+     */
+    private fun extractSpsPpsFromAvcc(buffer: ByteBuffer, length: Int): Pair<ByteBuffer, ByteBuffer>? {
+        if (length < 8) return null
+        val dup = buffer.duplicate()
+        dup.rewind()
+        var offset = 0
+        var sps: ByteBuffer? = null
+        var pps: ByteBuffer? = null
+        while (offset + 4 <= length) {
+            val nalSize = ((dup.get(offset).toInt() and 0xFF) shl 24) or
+                    ((dup.get(offset + 1).toInt() and 0xFF) shl 16) or
+                    ((dup.get(offset + 2).toInt() and 0xFF) shl 8) or
+                    (dup.get(offset + 3).toInt() and 0xFF)
+            offset += 4
+            if (nalSize <= 0 || offset + nalSize > length) break
+            when (dup.get(offset).toInt() and 0x1F) {
+                7 -> if (sps == null) sps = readNalWithStartCode(dup, offset, nalSize)
+                8 -> if (pps == null) pps = readNalWithStartCode(dup, offset, nalSize)
+            }
+            val foundSps = sps
+            val foundPps = pps
+            if (foundSps != null && foundPps != null) return Pair(foundSps, foundPps)
+            offset += nalSize
+        }
+        return null
+    }
+
+    private fun readNalWithStartCode(buffer: ByteBuffer, offset: Int, nalSize: Int): ByteBuffer {
+        val bytes = ByteArray(nalSize + 4)
+        bytes[0] = 0x00
+        bytes[1] = 0x00
+        bytes[2] = 0x00
+        bytes[3] = 0x01
+        buffer.position(offset)
+        buffer.get(bytes, 4, nalSize)
+        return ByteBuffer.wrap(bytes)
     }
 
     override fun setVideoFormat(videoFormat: MediaFormat) {
