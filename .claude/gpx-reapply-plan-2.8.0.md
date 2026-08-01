@@ -9,9 +9,10 @@ later items depend on earlier ones.
 
 ## Checklist
 
-- [ ] R1 — CodecUtil `isCBRModeSupported` null guard (debug logs and the copy-paste bug excluded)
-- [ ] R2 — VideoEncoder forced-VBR bitrate mode + `setTryForceVBRBitrateMode`
-- [ ] R3 — VideoEncoder prepend SPS/PPS to IDR frames (seekable VOD)
+- [x] R1 — CodecUtil `isCBRModeSupported` null guard (debug logs and the copy-paste bug excluded) — `62d7009e8`
+- [x] R2 — VideoEncoder forced-VBR bitrate mode + `setTryForceVBRBitrateMode` — `3751dc648`
+- [x] R3 — VideoEncoder prepend SPS/PPS to IDR frames (seekable VOD) — `3751dc648`
+- [ ] R3b — VideoEncoderHelper hvcC csd-0 parsing + start-code ordering bounds check (found during R2; was not in the original item list)
 - [ ] R4 — StreamBase keyframe on `startStream()` and on `startRecord()`
 - [ ] R5 — `takePhoto(width, height, callback)` overload (GlInterface, GlStreamInterface, OpenGlView)
 - [ ] R6 — FlvMuxerRecordController AVCC SPS/PPS fallback
