@@ -48,6 +48,17 @@ The marker convention is in `.claude/gpx-branch-policy.md`.
       itself as stale and close its own camera rather than the legitimate one that replaced it,
       and one latch per attempt replaces the shared semaphore that leaked a permit whenever a
       camera opened and later disconnected.
+- [x] R25 — Frame-rate ranges asked of a **named camera** rather than of a facing
+      (`gpxstream-app` S3). `Facing` has two values and Android has three: an external camera — a
+      capture card, a USB camera — reports `LENS_FACING_EXTERNAL`, which this class squeezes into
+      front-or-back in three places and gets three different answers (`openCameraId`'s tail says
+      BACK, `getFacingByCameraId` says FRONT, `getCameraIdForFacing` matches neither and falls
+      through to the first id). So `adaptFpsRange` resolved a facing back to an id and always
+      landed on the built-in sensor: every external input had its capture request's frame-rate
+      range negotiated from the phone's own camera. Adds a `getSupportedFps(size, cameraId)`
+      overload, points `adaptFpsRange` at it, and removes the hardcoded `cameraId == "1"` guess in
+      `adaptFpsRangeDynamic` that worked around the same thing. Authorised as a deliberate second
+      S3 fork change (Andy, 2026-08-03).
 - [ ] R24 — Tag `2.8.0-gpx2` and bump the pin in `gpxstream-app`'s CLAUDE.md and
       `docs/PHASE_3_PLAN.md`. **Deliberately deferred** (owner ruling 2026-08-03): a published tag
       cannot be moved and JitPack caches per tag, so the tag is cut once S3's camera driver has

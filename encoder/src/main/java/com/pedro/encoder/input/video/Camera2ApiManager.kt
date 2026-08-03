@@ -231,7 +231,13 @@ class Camera2ApiManager(context: Context) {
     }
 
     private fun adaptFpsRange(expectedFps: Int, builderInputSurface: CaptureRequest.Builder) {
-        val fpsRanges = getSupportedFps(null, facing)
+        // GPX R25 — ask the camera actually being opened, not a facing. `facing` has only two
+        // values here while Android has three: an external camera (a capture card, a USB camera)
+        // reports LENS_FACING_EXTERNAL, which this class squeezes into front-or-back in three
+        // different places and gets three different answers. Resolving a facing back to an id
+        // therefore lands on the built-in sensor whatever was opened, so every external input had
+        // its capture request's frame-rate range negotiated from the phone's own camera.
+        val fpsRanges = getSupportedFps(null, cameraId)
         if (fpsRanges.isNotEmpty()) {
             var closestRange = fpsRanges[0]
             var measure = (abs((closestRange.lower - expectedFps).toDouble()) + abs(
@@ -262,8 +268,9 @@ class Camera2ApiManager(context: Context) {
         // Find best FPS range instead of forcing strict [30, 30] which causes HAL duplication stutter
         var bestRange = Range(validFps, validFps)
         try {
-            val facing = if (cameraId == "1") Facing.FRONT else Facing.BACK
-            val supportedRanges = getSupportedFps(null, facing)
+            // GPX R25 — was `if (cameraId == "1") FRONT else BACK`, a hardcoded id working around
+            // the same two-values-for-three-cases problem. Asking by id removes the guess.
+            val supportedRanges = getSupportedFps(null, cameraId)
 
             // Look for a range that maxes out at our target FPS, but allows dipping to save light (e.g. [24, 30] or [15, 30])
             for (range in supportedRanges) {
@@ -296,9 +303,19 @@ class Camera2ApiManager(context: Context) {
         this.customCaptureCompletedCallback = callback
     }
 
-    fun getSupportedFps(size: Size?, facing: Facing): List<Range<Int>> {
+    fun getSupportedFps(size: Size?, facing: Facing): List<Range<Int>> =
+        getSupportedFps(size, getCameraIdForFacing(facing))
+
+    /**
+     * GPX R25 — the ranges a **named** camera supports.
+     *
+     * The facing-taking overload above cannot answer this for an external camera: `Facing` has two
+     * values and Android has three, so resolving a facing back to an id returns the built-in
+     * sensor whatever is actually open. Callers that know which camera they mean should use this.
+     */
+    fun getSupportedFps(size: Size?, cameraId: String): List<Range<Int>> {
         try {
-            val characteristics = cameraManager.getCameraCharacteristics(getCameraIdForFacing(facing))
+            val characteristics = cameraManager.getCameraCharacteristics(cameraId)
             val fpsSupported = characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: return emptyList()
             return if (size != null) {
                 val streamConfigurationMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)

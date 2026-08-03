@@ -84,7 +84,15 @@ covered: duration, a degrading link, and a moving vehicle — nothing has run fo
 adverse conditions.
 
 **Branch head, ahead of `2.8.0-gpx1` and untagged — build-verified only.** It carries R23, the
-bounded camera open. The paths that change are the ones a healthy open never takes: the timeout,
-and a framework callback arriving for an attempt already given up on. Neither has been provoked on
-hardware, and a normal open is unaffected by construction (the wait resolves in 13-19 ms against a
-3,000 ms bound). The tag is deliberately held until the bench pass — see R24 in the re-apply plan.
+bounded camera open, and R25, frame-rate ranges asked of a named camera.
+
+R23's changed paths are the ones a healthy open never takes: the timeout, and a framework callback
+arriving for an attempt already given up on. Neither has been provoked on hardware, and a normal
+open is unaffected by construction (the wait resolves in 13-19 ms against a 3,000 ms bound).
+
+R25 changes every open, so it wants watching on the bench: an external input's capture request now
+carries a frame-rate range from that input's own advertised list rather than from the built-in
+sensor's. The old behaviour was tolerated by this hardware, so the visible outcome should be no
+change; a *difference* in behaviour is the thing to look for.
+
+The tag is deliberately held until the bench pass — see R24 in the re-apply plan.
