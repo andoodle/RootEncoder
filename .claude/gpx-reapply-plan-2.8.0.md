@@ -47,7 +47,13 @@ The marker convention is in `.claude/gpx-branch-policy.md`.
       change for a camera that never opened), a generation token lets a late callback recognise
       itself as stale and close its own camera rather than the legitimate one that replaced it,
       and one latch per attempt replaces the shared semaphore that leaked a permit whenever a
-      camera opened and later disconnected. Tagged `2.8.0-gpx2`.
+      camera opened and later disconnected.
+- [ ] R24 — Tag `2.8.0-gpx2` and bump the pin in `gpxstream-app`'s CLAUDE.md and
+      `docs/PHASE_3_PLAN.md`. **Deliberately deferred** (owner ruling 2026-08-03): a published tag
+      cannot be moved and JitPack caches per tag, so the tag is cut once S3's camera driver has
+      exercised the bounded open on the bench PDT rather than while it is build-verified only.
+      `gpxstream-app` builds against this branch meanwhile through the `rootencoder.local`
+      composite-build switch, so nothing is blocked. The pin stays at `2.8.0-gpx1` until then.
 
 ## Correction to R14's scope
 

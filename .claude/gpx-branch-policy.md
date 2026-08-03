@@ -16,7 +16,7 @@ pinned to one cannot be moved to the other without code changes.
 | Tag line | Head tag | Consumer |
 |---|---|---|
 | `2.7.5-gpx*` | `2.7.5-gpx25` | `gpxnative-ai` |
-| `2.8.0-gpx*` | `2.8.0-gpx2` | `gpxstream-app` |
+| `2.8.0-gpx*` | `2.8.0-gpx1` | `gpxstream-app` |
 
 JitPack builds per tag, so a pin resolves the tagged commit regardless of what any branch
 does afterwards. Moving `gpx-2.8` cannot affect a consumer pinned to `2.7.5-gpx25`.
@@ -83,7 +83,8 @@ camera retained, and switching between all three inputs was exercised on the sam
 covered: duration, a degrading link, and a moving vehicle — nothing has run for hours or in
 adverse conditions.
 
-**`2.8.0-gpx2` — build-verified only.** It adds R23, the bounded camera open. The paths that
-change are the ones a healthy open never takes: the timeout, and a framework callback arriving
-for an attempt already given up on. Neither has been provoked on hardware, and a normal open is
-unaffected by construction (the wait resolves in 13-19 ms against a 3,000 ms bound).
+**Branch head, ahead of `2.8.0-gpx1` and untagged — build-verified only.** It carries R23, the
+bounded camera open. The paths that change are the ones a healthy open never takes: the timeout,
+and a framework callback arriving for an attempt already given up on. Neither has been provoked on
+hardware, and a normal open is unaffected by construction (the wait resolves in 13-19 ms against a
+3,000 ms bound). The tag is deliberately held until the bench pass — see R24 in the re-apply plan.
