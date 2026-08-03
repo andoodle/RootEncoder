@@ -184,7 +184,8 @@ class FlvMuxerRecordController: AsyncBaseRecordController() {
     }
 
     /**
-     * Read SPS and PPS out of an AVCC-framed keyframe: a sequence of [4-byte big-endian length]
+     * GPX R6 — read SPS and PPS out of an AVCC-framed keyframe: a sequence of [4-byte big-endian
+     * length]
      * [NAL] units, where NAL header type 7 is SPS and 8 is PPS. Returned with Annex-B start codes
      * prepended, matching what decodeSpsPpsFromBuffer returns for Annex-B input.
      *

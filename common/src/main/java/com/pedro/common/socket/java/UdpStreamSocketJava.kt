@@ -119,6 +119,7 @@ class UdpStreamSocketJava(
 
     override fun isReachable(): Boolean = socket?.inetAddress?.isReachable(timeout.toInt()) ?: false
 
+    // GPX R8 — applies SO_TIMEOUT to an already-open socket, which the base implementation cannot.
     override fun setReadTimeout(timeoutMs: Long) {
         this.timeout = timeoutMs
         socket?.soTimeout = timeoutMs.toInt()

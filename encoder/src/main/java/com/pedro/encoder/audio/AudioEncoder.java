@@ -125,6 +125,7 @@ public class AudioEncoder extends BaseEncoder implements GetMicrophoneData {
 
   @Override
   public void start(boolean resetTs) {
+    // GPX R9 — continuous timestamps across a stop/start, so a restarted encoder does not rewind.
     if (resetTs && !forceContinuousTs) tsBuffer = 0;
     shouldReset = resetTs;
     Log.i(TAG, "started");

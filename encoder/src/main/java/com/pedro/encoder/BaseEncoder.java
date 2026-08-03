@@ -53,10 +53,10 @@ public abstract class BaseEncoder implements EncoderCallback {
   protected MediaCodec codec;
   protected volatile long presentTimeUs;
   protected volatile boolean running = false;
-  // Whether codec.start() has run since the last stop. Gates the flush on the stop path.
+  // GPX R10 — whether codec.start() has run since the last stop. Gates the flush on the stop path.
   private volatile boolean codecStarted = false;
   protected boolean isBufferMode = true;
-  // When true the timestamp baseline survives a stop/start cycle, so output PTS stays monotonic
+  // GPX R9 — when true the timestamp baseline survives a stop/start cycle, so output PTS stays
   // across a restart instead of rebasing to zero. See forceContinuousTs(). Subclasses keep their
   // own rebase reference (firstTimestamp / tsBuffer).
   protected volatile boolean forceContinuousTs = false;
@@ -64,7 +64,7 @@ public abstract class BaseEncoder implements EncoderCallback {
   private MediaCodec.Callback callback;
   private volatile long oldTimeStamp = 0L;
   protected boolean shouldReset = true;
-  // Volatile because isPrepared() is read from app threads while this is written on the
+  // GPX R19 — volatile because isPrepared() is read from app threads while this is written on the
   // codec-callback thread by the reloadCodec -> reset() recovery path. A stale true reading there
   // would wave through a caller that concluded nothing needs re-preparing.
   protected volatile boolean prepared = false;
@@ -90,7 +90,8 @@ public abstract class BaseEncoder implements EncoderCallback {
 
   public void start(long startTs) {
     if (!prepared) throw new IllegalStateException(TAG + " not prepared yet. You must call prepare method before start it");
-    // Continuous mode keeps the existing baseline so PTS carries on across a restart. Otherwise
+    // GPX R9 — continuous mode keeps the existing baseline so PTS carries on across a restart.
+    // Otherwise
     // each start rebases to the supplied timestamp.
     if (!forceContinuousTs || presentTimeUs == 0) presentTimeUs = startTs;
     start(true);
@@ -102,7 +103,8 @@ public abstract class BaseEncoder implements EncoderCallback {
   }
 
   /**
-   * Keep the timestamp baseline across stop/start cycles so output PTS stays monotonic across a
+   * GPX R9 — keep the timestamp baseline across stop/start cycles so output PTS stays monotonic
+   * across a
    * restart, such as a reconnect, instead of rebasing to zero. An HLS packager downstream reads a
    * rebase as a backward timestamp jump and emits a discontinuity. Default false.
    */
@@ -112,7 +114,7 @@ public abstract class BaseEncoder implements EncoderCallback {
 
   protected void setCallback() {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && type != AudioCodec.G711) {
-      // This method creates a HandlerThread per call. Every caller that reaches it through a
+      // GPX patch — this method creates a HandlerThread per call. Every caller that reaches it
       // prepare path ran stop() first, which quits and joins the previous thread. VideoEncoder's
       // configure-retry calls setCallback twice with no intervening stop(), so retire any thread
       // still held rather than leaving one per attempt. Idempotent after stop(): quitting an
@@ -127,7 +129,8 @@ public abstract class BaseEncoder implements EncoderCallback {
   }
 
   /**
-   * Quit and join whatever HandlerThread {@link #setCallback()} last created, if any. Split out so
+   * GPX patch — quit and join whatever HandlerThread {@link #setCallback()} last created, if any.
+   * Split out so
    * a caller that must re-register the async callback without going through the full {@link #stop()}
    * path can still retire the old thread.
    */
@@ -229,7 +232,7 @@ public abstract class BaseEncoder implements EncoderCallback {
         handlerThread.getLooper().quit();
       }
       handlerThread.quit();
-      // Only flush a codec that reached Executing. Flushing a codec that is merely Configured --
+      // GPX R10 — only flush a codec that reached Executing. Flushing one merely Configured --
       // prepared but never started, which is every cold-start re-prepare -- makes MediaCodec log
       // "flush() is valid only at Executing states" natively before throwing the
       // IllegalStateException swallowed here.
@@ -326,7 +329,7 @@ public abstract class BaseEncoder implements EncoderCallback {
   }
 
   /**
-   * True when a codec has been configured successfully and not stopped since.
+   * GPX R19 — true when a codec has been configured successfully and not stopped since.
    *
    * Distinct from {@link #isRunning()}: an encoder can be prepared but not started, which is every
    * cold-start re-prepare, and {@link #stop()} clears this without the caller preparing again.

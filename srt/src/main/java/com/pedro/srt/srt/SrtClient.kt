@@ -70,8 +70,8 @@ class SrtClient(private val connectChecker: ConnectChecker) {
 
   private val TAG = "SrtClient"
 
-  // Handshake retransmit backoff, in milliseconds, and also the socket read timeout during the
-  // handshake, which sets the poll granularity.
+  // GPX R8 — handshake retransmit backoff, in milliseconds, and also the socket read timeout during
+  // the handshake, which sets the poll granularity.
   //
   // Sending each handshake once and block-reading the whole latency-derived socketTimeout makes one
   // lost UDP packet cost the entire window, which surfaces as "Poll timed out". Re-knocking fixes
@@ -95,7 +95,7 @@ class SrtClient(private val connectChecker: ConnectChecker) {
 
   private var checkServerAlive = false
 
-  // Wall-clock time the last packet was read from the socket. A silent UDP blackhole keeps sendto()
+  // GPX R7 — wall-clock time the last packet was read. A silent UDP blackhole keeps sendto()
   // succeeding, so the outbound byte counter keeps climbing while the server stops responding and
   // nothing reports a failure. This reads SRT's own control traffic (ACK and KeepAlive arrive
   // sub-second at any latency) rather than ICMP, so a firewall that drops ICMP does not blind it.
@@ -103,7 +103,7 @@ class SrtClient(private val connectChecker: ConnectChecker) {
   private var lastInboundMs = 0L
   private var inboundSilenceJob: Job? = null
 
-  // Inbound-silence dead-link timeout. Fixed rather than scaled with latency: an ingest server that
+  // GPX R7 — inbound-silence dead-link timeout. Fixed rather than scaled with latency: a server that
   // drops the publisher at a fixed interval cannot be ridden through by waiting longer, and scaling
   // with latency only delays detection. 5,500 ms sits above an observed 5 s server-side drop, which
   // still rides through shorter blips. Checked on its own 1 s tick rather than inside the
@@ -241,11 +241,11 @@ class SrtClient(private val connectChecker: ConnectChecker) {
 
         val host = urlParser.host
         val port = urlParser.port ?: 8888
-        // getFullPath(), not path: it keeps the query string attached, which is what a Millicast SRT
+        // GPX patch — getFullPath(), not path: it keeps the query string attached, which a Millicast
         // ingest expects as the streamid when the publishing token rides in the URL as "?t=".
         val path = urlParser.getQuery("streamid") ?: urlParser.getFullPath()
         commandsManager.latency = urlParser.getQuery("latency")?.toIntOrNull() ?: commandsManager.latency
-        // Re-derive the socket read timeout from the URL latency on every connect. A host app that
+        // GPX patch — re-derive the socket read timeout from the URL latency on every connect. A host
         // sets socketTimeout once at configure time leaves it stale after a latency change plus a
         // reconnect. latency is microseconds, socketTimeout is milliseconds.
         socketTimeout = (commandsManager.latency / 1000L) + 1000L
@@ -268,13 +268,13 @@ class SrtClient(private val connectChecker: ConnectChecker) {
         commandsManager.host = host
 
         val error = runCatching {
-          // Short read timeout during the handshake so a missed reply re-knocks on the retransmit
+          // GPX R8 — short read timeout during the handshake so a missed reply re-knocks on the
           // cadence instead of blocking the whole latency window on one packet.
           socket = SrtSocket(socketType, host, port, HANDSHAKE_RETRANSMIT_MS)
           socket?.connect()
           commandsManager.loadStartTs()
 
-          // Total knock budget equals the latency-derived socketTimeout that the single block-read
+          // GPX R8 — total knock budget equals the latency-derived socketTimeout the single block-read
           // used to consume; the retransmits happen inside that same window.
           val handshakeDeadlineMs = System.currentTimeMillis() + socketTimeout
 
@@ -295,7 +295,7 @@ class SrtClient(private val connectChecker: ConnectChecker) {
               path = path,
               encryptInfo = commandsManager.getEncryptInfo()
             ))
-          // Accept only CONCLUSION here, so an INDUCTION echo buffered from an earlier retransmit is
+          // GPX R8 — accept only CONCLUSION here, so an INDUCTION echo buffered from an earlier
           // skipped rather than mistaken for the reply.
           val responseConclusion = pollHandshake(handshakeDeadlineMs, "conclusion", HandshakeType.CONCLUSION) {
             commandsManager.writeHandshake(socket, conclusion)
@@ -309,7 +309,7 @@ class SrtClient(private val connectChecker: ConnectChecker) {
             commandsManager.socketId = responseConclusion.srtSocketId
             commandsManager.MTU = responseConclusion.MTU
             commandsManager.sequenceNumber = responseConclusion.initialPacketSequence
-            // Handshake done: restore the latency-derived read timeout for the streaming read loop.
+            // GPX R8 — handshake done: restore the latency-derived read timeout for the read loop.
             socket?.setReadTimeout(socketTimeout)
             onMainThread {
               connectChecker.onConnectionSuccess()
@@ -333,7 +333,8 @@ class SrtClient(private val connectChecker: ConnectChecker) {
   }
 
   /**
-   * Send a handshake through [send] and poll for its reply, retransmitting on a growing gap until a
+   * GPX R8 — send a handshake through [send] and poll for its reply, retransmitting on a growing
+   * gap until a
    * usable reply arrives or [deadlineMs] passes.
    *
    * [acceptType] gates which reply ends the loop; handshakes of other types are skipped, so an
@@ -380,7 +381,7 @@ class SrtClient(private val connectChecker: ConnectChecker) {
   }
 
   /**
-   * Report the link dead once no packet has been read for [inboundSilenceTimeoutMs].
+   * GPX R7 — report the link dead once no packet has been read for [inboundSilenceTimeoutMs].
    *
    * Runs on its own [inboundSilenceTickMs] tick rather than inside the readBuffer loop, whose block
    * can last multiple seconds, so the report does not wait for the next socket read to wake. This
@@ -490,7 +491,7 @@ class SrtClient(private val connectChecker: ConnectChecker) {
   @Throws(IOException::class)
   private suspend fun handleMessages() {
     val responseBufferConclusion = socket?.readBuffer() ?: throw IOException("read buffer failed, socket disconnected")
-    // A packet arrived, so the server is responding. Reset the silence timer.
+    // GPX R7 — a packet arrived, so the server is responding. Reset the silence timer.
     lastInboundMs = System.currentTimeMillis()
     when(val srtPacket = SrtPacket.getSrtPacket(responseBufferConclusion)) {
       is DataPacket -> {
@@ -611,7 +612,7 @@ class SrtClient(private val connectChecker: ConnectChecker) {
   fun getItemsInCache(): Int = srtSender.getItemsInCache()
 
   /**
-   * Milliseconds since the last inbound packet was read from the socket, or -1 when not streaming or
+   * GPX R7 — milliseconds since the last inbound packet was read, or -1 when not streaming or
    * not yet established. On a responding link this stays near zero, because SRT sends ACK and
    * KeepAlive control packets sub-second at any latency, and it grows once the server stops
    * responding. An outbound bytes-sent counter cannot show this, since sendto() keeps succeeding

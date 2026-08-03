@@ -82,7 +82,7 @@ class WhipSender(
         baseSenderReport?.setSSRC(ssrcVideo, ssrcAudio)
         videoPacket.setSSRC(ssrcVideo)
         audioPacket.setSSRC(ssrcAudio)
-        // Cap WHIP packets at 1200 bytes. An SFU relaying to viewers adds RTX and its own header
+        // GPX R14 — cap WHIP packets at 1200 bytes. An SFU relaying to viewers adds RTX and header
         // extensions, and at the RTSP default the relayed packet exceeds path MTU on the viewer leg,
         // fragments and is dropped, so keyframes never arrive and the viewer sees no picture.
         videoPacket.overrideMaxPacketSize(1200)

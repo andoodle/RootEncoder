@@ -30,24 +30,35 @@ signatures and moved parsers into `com.pedro.common`.
 
 ## Marking GPX changes in the source
 
-**Every GPX edit carries a `GPX R<N>` marker comment at each place it changes.** One marker per
+**Every GPX edit carries a `GPX` marker comment at each place it changes.** One marker per
 contiguous changed region — on the KDoc of an added member, or as the first line of a changed
-block. `grep -rn "GPX R" --include=*.kt --include=*.java` then enumerates the divergence from
-upstream directly from the tree.
+block. The enumeration command is:
+
+```
+git grep -n "GPX " -- "*.kt" "*.java"
+```
 
 This exists because the alternative does not survive a rebase. A GPX change was previously
 findable only from its commit message and this repo's re-apply checklist, and the next upstream
 sync rewrites the commits and starts a new checklist — so at exactly the moment someone needs to
 know "what did we change here, and why", the answer has moved out of the file.
 
-`<N>` continues the re-apply plan's item numbering (`.claude/gpx-reapply-plan-2.8.0.md`), so a
-marker and a checklist entry name the same work. The number is never reused across upstream
-syncs: a re-applied change keeps the number it was given.
+**Two marker forms.** `GPX R<N>` where the change maps to a re-apply item
+(`.claude/gpx-reapply-plan-2.8.0.md`), so a marker and a checklist entry name the same work; the
+number is never reused across upstream syncs, and a re-applied change keeps the number it was
+given. `GPX patch` where no item covers it — several small changes were made alongside a larger
+item and were never enumerated separately. A bare `GPX patch` is preferred over guessing a number,
+because a wrong attribution is worse than an absent one.
 
-**Coverage today: markers start at R23.** R1–R22 were applied before this convention and carry
-none, so a grep understates the divergence — the re-apply checklist plus
-`git diff 9a9ca124f...gpx-2.8` is what enumerates those. Retro-marking them is worth doing and
-has not been done.
+**Coverage: all 32 files that differ from upstream `9a9ca124f` carry at least one marker**
+(swept 2026-08-03). Two caveats on reading a grep as complete:
+
+- `StreamBase.kt` is a dense grouped rewrite where the marked regions are an index rather than a
+  full inventory; its class KDoc says so.
+- A marker is a comment, so a change with nothing to attach one to may be unmarked.
+
+`git diff 9a9ca124f -- <file>` remains the authority; the markers are what make the divergence
+legible without running it.
 
 ## Rules
 

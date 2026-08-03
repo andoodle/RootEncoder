@@ -404,7 +404,7 @@ public class CodecUtil {
         mediaCodecInfo.getCapabilitiesForType(mime);
     MediaCodecInfo.EncoderCapabilities encoderCapabilities =
         codecCapabilities.getEncoderCapabilities();
-    // getEncoderCapabilities() is null on some vendor codecs that still advertise the mime.
+    // GPX R1 — getEncoderCapabilities() is null on some vendor codecs that still advertise the mime.
     // A codec whose bitrate modes cannot be read counts as not supporting CBR.
     if (encoderCapabilities == null) return false;
     return encoderCapabilities.isBitrateModeSupported(

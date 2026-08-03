@@ -63,6 +63,26 @@ import kotlin.math.max
  * - video source camera1, camera2 or screen.
  * - audio source microphone or internal.
  * - Rotation on realtime.
+ *
+ * ---
+ *
+ * **GPX — this file carries the largest concentration of fork changes, applied as one group.**
+ * They reference each other's fields, so they were re-applied together rather than as separate
+ * items (see `.claude/gpx-reapply-plan-2.8.0.md`, "Two plan revisions made while applying R1-R11").
+ * Present here:
+ *
+ * - **R4** — a keyframe on `startStream()` and on `startRecord()`.
+ * - **R9** — the non-resetting stop that keeps timestamps continuous across a codec change.
+ * - **R15** — the [warmSources] seam.
+ * - **R18** — the negotiated-format seam ([setStreamVideoFormatListener], [getLastStreamVideoFormat]).
+ * - **R19** — the record codec applied coherently on a prepared encoder ([applyVideoRecCodec],
+ *   [recordCodecNeedsReprepare], and the `recordCodecPrepared` claim it maintains).
+ * - **GPX patch** — a `sourcesRunning` flag making `startSources`/`stopSources` idempotent and
+ *   transactional, and an `isOnPreview` ordering fix in `startPreview`.
+ *
+ * Individual regions below carry their own `GPX` marker. Because the group is this dense, treat
+ * the marked regions as the index rather than assuming the unmarked remainder is all upstream —
+ * `git diff 9a9ca124f -- <this file>` is the authority.
  */
 @RequiresApi(Build.VERSION_CODES.LOLLIPOP)
 abstract class StreamBase(
@@ -89,7 +109,7 @@ abstract class StreamBase(
   private var lastAudioFormat: MediaFormat? = null
 
   /**
-   * The stream encoder's negotiated MediaFormat.
+   * GPX R18 — the stream encoder's negotiated MediaFormat.
    *
    * Separate from [lastVideoFormat], which means "the format of whichever encoder feeds recording"
    * and is replayed into a newly installed controller by [setRecordController]. Writing the stream
@@ -101,12 +121,13 @@ abstract class StreamBase(
   @Volatile
   private var lastStreamVideoFormat: MediaFormat? = null
 
-  /** See [setStreamVideoFormatListener]. Volatile for the same reason as [lastStreamVideoFormat]. */
+  /** GPX R18 — see [setStreamVideoFormatListener]. Volatile as for [lastStreamVideoFormat]. */
   @Volatile
   private var streamVideoFormatListener: ((MediaFormat) -> Unit)? = null
 
   /**
-   * The codec the record encoder was last successfully prepared with, as observed here. Null means
+   * GPX R19 — the codec the record encoder was last successfully prepared with, as observed here.
+   * Null means
    * not known to be prepared with anything.
    *
    * A fact, never an intention. Only a site that applies a codec together with a profile and level
@@ -132,11 +153,12 @@ abstract class StreamBase(
   @Volatile
   private var recordCodecPrepared: VideoCodec? = null
 
-  /** The codec the record encoder currently holds. */
+  /** GPX R19 — the codec the record encoder currently holds. */
   private fun recordEncoderCodec(): VideoCodec? = videoEncoderRecord.type as? VideoCodec
 
   /**
-   * A replay just re-prepared the record encoder from its stored fields. Keep [recordCodecPrepared]
+   * GPX R19 — a replay just re-prepared the record encoder from its stored fields. Keep
+   * [recordCodecPrepared]
    * only if the replayed codec still matches it; otherwise the encoder moved to a codec whose
    * profile and level were never derived for it, so drop the claim and force the next caller to
    * re-prepare properly. Never sets: see [recordCodecPrepared].
@@ -297,11 +319,12 @@ abstract class StreamBase(
     try {
       startStreamImp(endPoint)
       transportStarted = true
-      // Unconditional: startSources() is idempotent on its own state, so this no longer has to infer
+      // GPX patch — unconditional: startSources() is idempotent on its own state, so this no longer
+      // has to infer
       // "are the sources up?" from isRecording, a flag that answers a different question and could
       // be false while they were running.
       startSources()
-      // Unconditional keyframe so a viewer joining at connect gets a decodable picture immediately
+      // GPX R4 — unconditional keyframe so a viewer joining at connect gets a decodable picture
       // rather than waiting for the next one in the GOP.
       requestKeyframe()
     } catch (e: RuntimeException) {
@@ -401,7 +424,7 @@ abstract class StreamBase(
     // rethrowing, so this catch does not have to.
     try {
       startSources()
-      // Unconditional keyframe so the file is decodable and seekable from its first frame.
+      // GPX R4 — unconditional keyframe so the file is decodable and seekable from its first frame.
       requestKeyframe()
     } catch (e: RuntimeException) {
       try {
@@ -485,7 +508,7 @@ abstract class StreamBase(
   fun startPreview(surface: Surface, width: Int, height: Int) {
     if (!surface.isValid) throw IllegalArgumentException("Make sure the Surface is valid")
     if (isOnPreview) throw IllegalStateException("Preview already started, stopPreview before startPreview again")
-    // isOnPreview flips only once the sources actually started. stopSources() reads it to decide
+    // GPX patch — isOnPreview flips only once the sources actually started. stopSources() reads it
     // whether to stop the video source, so setting it first meant a failed start left the flag true
     // and the source unstoppable.
     if (!glInterface.isRunning) glInterface.start()
@@ -644,7 +667,7 @@ abstract class StreamBase(
   }
 
   /**
-   * Observe the stream encoder's negotiated MediaFormat.
+   * GPX R18 — observe the stream encoder's negotiated MediaFormat.
    *
    * [setRecordController] only ever surfaces the format of whichever encoder feeds recording, and
    * when record dimensions are passed that is the record encoder, so the stream encoder's own agreed
@@ -663,7 +686,8 @@ abstract class StreamBase(
   }
 
   /**
-   * The stream encoder's most recently negotiated MediaFormat, or null if it has not produced one
+   * GPX R18 — the stream encoder's most recently negotiated MediaFormat, or null if it has not
+   * produced one
    * since the last prepareVideo. Cleared on prepare, so a format from a previous configuration is
    * never mistaken for the current one.
    */
@@ -685,7 +709,8 @@ abstract class StreamBase(
   protected fun getVideoFps() = videoEncoder.fps
 
   /**
-   * Start the camera and GL half of [startSources] without connecting or starting the encoders, so a
+   * GPX R15 — start the camera and GL half of [startSources] without connecting or starting the
+   * encoders, so a
    * caller can warm a released camera before [startStream] and the outbound connect does not begin
    * on a cold camera. It reuses the same guards as [startSources], so the later real [startSources]
    * no-ops on the camera and GL lines and still starts audio and the encoders.
@@ -911,7 +936,7 @@ abstract class StreamBase(
   abstract fun getStreamClient(): StreamBaseClient
 
   /**
-   * Force VBR bitrate mode on the next prepare of either encoder.
+   * GPX R2 — force VBR bitrate mode on the next prepare of either encoder.
    */
   fun setTryForceVBRBitrateMode(forVideoEncoder: Boolean, forVideoEncoderRecord: Boolean) {
     if (forVideoEncoder) videoEncoder.setTryForceVBRBitrateMode(true)
@@ -919,14 +944,14 @@ abstract class StreamBase(
   }
 
   /**
-   * A codec-namespaced profile and level pair, kept together because the
+   * GPX R18 — a codec-namespaced profile and level pair, kept together because the
    * MediaCodecInfo.CodecProfileLevel constants mean different things per codec, and a pair that
    * travels apart from its codec is how a cross-namespace mismatch happens.
    */
   data class ProfileLevel(val profile: Int, val level: Int)
 
   /**
-   * True if [applyVideoRecCodec] would have to re-prepare the record encoder.
+   * GPX R19 — true if [applyVideoRecCodec] would have to re-prepare the record encoder.
    *
    * Lets a caller decide whether it needs to derive a profile and level before calling. It is the
    * same predicate applyVideoRecCodec uses internally, exposed once so the two cannot diverge.
@@ -942,7 +967,7 @@ abstract class StreamBase(
   }
 
   /**
-   * Apply the record codec coherently to an already-prepared encoder.
+   * GPX R19 — apply the record codec coherently to an already-prepared encoder.
    *
    * Either the record encoder's codec, its profile and level, and the muxer's label all describe
    * [codec] when this returns true, or nothing is claimed and it returns false. Setting the codec
@@ -982,7 +1007,8 @@ abstract class StreamBase(
     val mustStartHere = wasRunning || isStreaming
 
     glInterface.removeMediaCodecRecordSurface()
-    // stop(false), not stop(): preserves the timestamp baseline so a recording spanning a codec
+    // GPX R9 — stop(false), not stop(): preserves the timestamp baseline so a recording spanning a
+    // codec
     // change keeps monotonic PTS. prepareVideoEncoder() would stop() it anyway; this is what makes
     // that stop non-resetting.
     videoEncoderRecord.stop(false)

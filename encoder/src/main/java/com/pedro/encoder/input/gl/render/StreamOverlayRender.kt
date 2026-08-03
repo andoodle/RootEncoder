@@ -29,6 +29,8 @@ import java.nio.FloatBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
+ * GPX R11 — a whole file added by the GPX fork; nothing upstream corresponds to it.
+ *
  * A full-frame bitmap plane composited into the stream encoder output only.
  *
  * The filter chain (MainRender.drawFilters) feeds the stream encoder, the record encoder, the

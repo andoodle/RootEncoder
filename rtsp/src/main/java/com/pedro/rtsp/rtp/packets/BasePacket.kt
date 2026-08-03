@@ -33,14 +33,14 @@ abstract class BasePacket(private var clock: Long, private val payloadType: Int)
   protected var channelIdentifier: Int = 0
   private var seq = 0L
   private var ssrc = 0L
-  // var, so the WebRTC and WHIP path can shrink it. RTSP leaves it at MTU - 28.
+  // GPX R14 — var, so the WebRTC and WHIP path can shrink it. RTSP leaves it at MTU - 28.
   protected var maxPacketSize = RtpConstants.MTU - 28
   protected var cryptoUtils: CryptoUtils? = null
   private var roc = 0
   protected val TAG = "BasePacket"
 
   /**
-   * Lower the RTP packet size below the RTSP default.
+   * GPX R14 — lower the RTP packet size below the RTSP default.
    *
    * An SFU that relays to viewers adds RTX and its own header extensions to each packet. At the
    * default size the relayed packet exceeds path MTU on the viewer leg, where it fragments and is

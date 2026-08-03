@@ -152,13 +152,13 @@ class Mpeg2TsMuxerRecordController : AsyncBaseRecordController() {
       outputStream?.let { outputStream ->
         mpegTsPackets.forEach { mpegTsPacket ->
           outputStream.write(mpegTsPacket.buffer)
-          // Every byte that reaches the file passes through here -- PSI, video and audio alike --
+          // GPX R12 — every byte that reaches the file passes through here (PSI, video and audio),
           // so getBytesWritten() is the exact size of the file on disk.
           countBytesWritten(mpegTsPacket.buffer.size)
         }
       }
     } catch (e: Exception) {
-      // A write failure has to be visible. Swallowing it meant a wedged or full disk recorded
+      // GPX R12 — a write failure has to be visible. Swallowing it meant a wedged or full disk
       // nothing for the rest of the session with no report. First failure only, because a dead
       // output fails once per frame.
       if (!writeErrorNotified) {

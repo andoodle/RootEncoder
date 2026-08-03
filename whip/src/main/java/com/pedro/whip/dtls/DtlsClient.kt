@@ -54,7 +54,8 @@ import javax.crypto.Cipher
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * GPX patch: DTLS-SRTP CLIENT role for WHIP.
+ * GPX R14 — DTLS-SRTP CLIENT role for WHIP. A whole file added by the GPX fork; nothing upstream
+ * corresponds to it.
  *
  * The original whip module only implemented the DTLS server role (see [DtlsConnection]). Production
  * WHIP ingests such as Millicast/Dolby always answer a=setup:passive (the SFU is the DTLS server) and

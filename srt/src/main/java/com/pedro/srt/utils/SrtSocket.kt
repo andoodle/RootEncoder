@@ -39,6 +39,7 @@ class SrtSocket(type: SocketType, host: String, port: Int, timeout: Long) {
 
   fun isReachable() = socket.isReachable()
 
+  // GPX R8 — lets the handshake poll on a short cadence and restore the streaming timeout after.
   fun setReadTimeout(timeoutMs: Long) = socket.setReadTimeout(timeoutMs)
 
   suspend fun write(srtPacket: SrtPacket) {

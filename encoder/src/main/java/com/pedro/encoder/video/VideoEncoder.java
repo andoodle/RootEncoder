@@ -73,11 +73,12 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   private int level = -1;
   private final SpsColorPatcher spsColorPatcher = new SpsColorPatcher();
   private boolean forceBt709Color = false;
-  // When set, the next prepareVideoEncoder asks for VBR instead of CBR. The record encoder wants
+  // GPX R2 — when set, the next prepareVideoEncoder asks for VBR instead of CBR. The record encoder
   // VBR so a recorded file spends bits where the picture needs them; the stream encoder wants CBR
   // so the link sees a flat rate.
   private boolean tryForceVBRBitrateMode = false;
-  // Sticky per-process record that this device's encoder rejected KEY_MAX_B_FRAMES at configure
+  // GPX R17 — sticky per-process record that this device's encoder rejected KEY_MAX_B_FRAMES at
+  // configure
   // time, so the retry is paid once rather than on every reset() or reloadCodec() recovery, which is
   // exactly where extra codec setup hurts. Static so the record encoder inherits what the stream
   // encoder learned. Not persisted: one failed configure per process launch on a rejecting device is
@@ -88,7 +89,7 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   // today it is harmless. On Main or High, H264 depends on the key too, and a rejection latched by
   // the HEVC component would silently stop the H264 encoder requesting it.
   private static volatile boolean maxBFramesKeyRejected = false;
-  // What this instance actually asked for at its last configure. Reading the static flag at log time
+  // GPX R17 — what this instance actually asked for at its last configure. Reading the static flag
   // would misreport the stream encoder's request if the record encoder latched a rejection in
   // between, and this log is the evidence of whether B-frame suppression was attempted at all.
   private boolean zeroBFramesRequestedForThisCodec = false;
@@ -148,7 +149,7 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
         Log.e(TAG, "Valid encoder not found");
         return false;
       }
-      // Ask for zero B-frames, and fall back if the vendor rejects the key.
+      // GPX R17 — ask for zero B-frames, and fall back if the vendor rejects the key.
       //
       // No publisher in this library can carry a decode order that differs from presentation order:
       // RTMP hardcodes the FLV composition-time offset to 0, MPEG-TS writes PES with PTS and no DTS,
@@ -164,13 +165,14 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
         configureCodec(encoder, requestZeroBFrames);
       } catch (Exception e) {
         if (!requestZeroBFrames) {
-          // Nothing to retry, either pre-Q or already latched. Release here rather than falling into
+          // GPX R17 — nothing to retry, either pre-Q or already latched. Release here rather than
+          // falling into
           // the outer catch's stop(), whose codec.stop() throws from the Error state and then nulls
           // the codec without releasing it.
           releaseCodecForRetry();
           throw e;
         }
-        // configure() is where a vendor rejects a format, and a rejection moves the codec to the
+        // GPX R17 — configure() is where a vendor rejects a format, and a rejection moves it to the
         // Error state, where configure() is itself illegal -- so a retry on the same instance would
         // throw again. The instance is torn down and rebuilt, and the async callback re-registered,
         // because an unserviced codec hangs. Without this retry one unrecognised key would stop the
@@ -180,12 +182,12 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
         try {
           configureCodec(encoder, false);
         } catch (Exception retryFailure) {
-          // The retry failed too, so the key was not the cause; leave the flag alone so the next
+          // GPX R17 — the retry failed too, so the key was not the cause; leave the flag alone so
           // prepare tries it again.
           releaseCodecForRetry();
           throw retryFailure;
         }
-        // Best available evidence that the key was the cause: without it the same configure
+        // GPX R17 — best available evidence that the key was the cause: without it the same configure
         // succeeds. Not proof -- a transient first-attempt failure followed by a clean retry latches
         // the flag too, and there is no un-latch. Latching on the first throw instead would suppress
         // the key for the whole process after any configure failure, reinstating the B-frame
@@ -211,7 +213,8 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   }
 
   /**
-   * Build the format, register the async callback and configure, as one unit that can be attempted
+   * GPX R17 — build the format, register the async callback and configure, as one unit that can be
+   * attempted
    * twice. Kept separate from prepareVideoEncoder because a retry bolted onto the linear body is how
    * the callback re-registration and the thread teardown get missed.
    */
@@ -224,7 +227,8 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   }
 
   /**
-   * Return the codec to a state where configure() is legal again after a rejected format. Not
+   * GPX R17 — return the codec to a state where configure() is legal again after a rejected format.
+   * Not
    * {@link #stop()}: that calls codec.stop() first, which throws from the Error state, and its catch
    * then nulls the codec without releasing it.
    */
@@ -283,13 +287,14 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
       // MediaFormat.KEY_LEVEL, API > 23
       videoFormat.setInteger("level", this.level);
     }
-    // Ask the encoder to repeat SPS/PPS ahead of every IDR frame. A recorded file is then decodable
+    // GPX R3 — ask the encoder to repeat SPS/PPS ahead of every IDR frame. A recorded file is then
+    // decodable
     // from any keyframe rather than only from its first frame, which is what makes clip extraction
     // at a keyframe boundary produce a playable file. Encoders that do not know the key ignore it.
     if (type == VideoCodec.H264 || type == VideoCodec.H265) {
       videoFormat.setInteger("prepend-sps-pps-to-idr-frames", 1);
     }
-    // Set BT.709 color metadata so the encoder embeds correct VUI in the SPS NAL unit.
+    // GPX patch — set BT.709 color metadata so the encoder embeds correct VUI in the SPS NAL unit.
     // Without this, devices default to smpte170m/bt470bg which ffprobe/players read incorrectly.
     // KEY_COLOR_STANDARD / KEY_COLOR_TRANSFER / KEY_COLOR_RANGE added in API 24.
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && forceBt709Color) {
@@ -356,7 +361,7 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   }
 
   /**
-   * Re-prepare with the stored geometry but a new profile and level.
+   * GPX R18 — re-prepare with the stored geometry but a new profile and level.
    *
    * The no-arg replay above re-sends the stored profile and level while chooseEncoder() reads the
    * current {@code type}, so a caller that changed the codec gets an encoder on the new codec
@@ -407,7 +412,7 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   }
 
   /**
-   * Request VBR instead of CBR on the next prepareVideoEncoder. Has no effect on an encoder that
+   * GPX R2 — request VBR instead of CBR on the next prepareVideoEncoder. Has no effect on one that
    * is already prepared.
    */
   public void setTryForceVBRBitrateMode(boolean tryForceVBRBitrateMode) {
@@ -575,7 +580,7 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   }
 
   /**
-   * Log what the encoder negotiated, as opposed to what was requested.
+   * GPX R18 — log what the encoder negotiated, as opposed to what was requested.
    *
    * Reports two things a MediaFormat consumer cannot get elsewhere: the profile and level as this
    * encoder stored them, and zeroBFramesRequestedForThisCodec, which is private state rather than a

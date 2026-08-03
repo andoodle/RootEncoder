@@ -36,8 +36,8 @@ abstract class StreamSocket {
   abstract fun isReachable(): Boolean
 
   /**
-   * Change the read timeout. The SRT handshake polls on a short cadence while connecting and
-   * restores the latency-derived timeout once streaming.
+   * GPX R8 — change the read timeout. The SRT handshake polls on a short cadence while connecting
+   * and restores the latency-derived timeout once streaming.
    *
    * This base implementation only updates the field, which takes effect at the next [connect]. The
    * Java UDP socket overrides it to also apply SO_TIMEOUT to an already-open socket.

@@ -65,8 +65,8 @@ open class OpenGlView : SurfaceView, GlInterface, OnFrameAvailableListener, Surf
     private var encoderHeight = 0
     private var encoderRecordWidth = 0
     private var encoderRecordHeight = 0
-    // Size the next photo capture renders and reads back at. The one-argument takePhoto sets it to
-    // the encoder size, so a caller that does not ask for a size keeps the encoder size.
+    // GPX R5 — size the next photo capture renders and reads back at. The one-argument takePhoto
+    // sets it to the encoder size, so a caller that does not ask for a size keeps the encoder size.
     private var photoWidth = 0
     private var photoHeight = 0
     private var takePhotoCallback: TakePhotoCallback? = null
@@ -212,9 +212,10 @@ open class OpenGlView : SurfaceView, GlInterface, OnFrameAvailableListener, Surf
 
     override fun getEncoderSize() = Point(encoderWidth, encoderHeight)
 
-    // The stream-only overlay plane splits the stream encoder surface from the record encoder
-    // surface. View-based rendering draws one screen with no such split, so there is nothing to
-    // separate here.
+    // GPX R11 — the stream-only overlay plane splits the stream encoder surface from the record
+    // encoder surface. View-based rendering draws one screen with no such split, so there is nothing
+    // to separate here. Note for callers: this silently discards the overlay, so anything that needs
+    // it must hold a GlStreamInterface rather than the general GlInterface.
     override fun setStreamOverlay(bitmap: android.graphics.Bitmap?) = Unit
 
     override fun takePhoto(takePhotoCallback: TakePhotoCallback) {
@@ -223,6 +224,7 @@ open class OpenGlView : SurfaceView, GlInterface, OnFrameAvailableListener, Surf
         this.photoHeight = encoderHeight
     }
 
+    // GPX R5 — capture at an explicit size rather than the encoder size.
     override fun takePhoto(width: Int, height: Int, takePhotoCallback: TakePhotoCallback) {
         this.takePhotoCallback = takePhotoCallback
         this.photoWidth = width

@@ -53,7 +53,7 @@ class RtmpSender(
   var socket: RtmpSocket? = null
 
   override fun setVideoInfo(sps: ByteBuffer, pps: ByteBuffer?, vps: ByteBuffer?) {
-    // This runs on the MediaCodec async callback thread, via VideoEncoder.formatChanged ->
+    // GPX R13 — this runs on the MediaCodec async callback thread, via VideoEncoder.formatChanged ->
     // sendSPSandPPS -> onVideoInfo, rather than on app code, so a throw here ends the process and no
     // app-side catch can intervene. An encoder reconfigure that is still settling can deliver an
     // incomplete parameter set. Drop it and keep the previous videoPacket, so a later complete

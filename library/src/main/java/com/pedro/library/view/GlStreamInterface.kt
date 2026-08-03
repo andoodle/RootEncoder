@@ -57,7 +57,7 @@ import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 
-// Bound for stop()'s wait on the queued releaseSurfaceManagers() task. Long enough for a normal
+// GPX R16 — bound for stop()'s wait on the queued releaseSurfaceManagers() task. Long enough for a
 // release, short enough that a caller blocked in stop() -- which can reach the main thread through
 // StreamBase.stopPreview()'s SurfaceHolder callback -- is not held for long.
 private const val STOP_RELEASE_AWAIT_MS = 300L
@@ -77,15 +77,15 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
   private val surfaceManagerPreview = SurfaceManager()
   private val multiPreviewSurfaceManagers = ConcurrentHashMap<Surface, PreviewSurfaceInfo>()
   private val mainRender = MainRender()
-  // Drawn into the stream encoder surface only, never the record encoder, preview or photo.
+  // GPX R11 — drawn into the stream encoder surface only, never the record encoder, preview or photo.
   private val streamOverlayRender = StreamOverlayRender()
 
   private var encoderWidth = 0
   private var encoderHeight = 0
   private var encoderRecordWidth = 0
   private var encoderRecordHeight = 0
-  // Size the next photo capture renders and reads back at. The one-argument takePhoto sets it to
-  // the encoder size, so a caller that does not ask for a size keeps the encoder size.
+  // GPX R5 — size the next photo capture renders and reads back at. The one-argument takePhoto sets
+  // it to the encoder size, so a caller that does not ask for a size keeps the encoder size.
   private var photoWidth = 0
   private var photoHeight = 0
   private var streamOrientation = 0
@@ -104,7 +104,7 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
   private var isStreamVerticalFlip = false
   private var aspectRatioMode = AspectRatioMode.Adjust
   private var executor: ExecutorService? = null
-  // The teardown submitted by the last stop(). start() waits on it before reusing shared GL state.
+  // GPX R16 — the teardown submitted by the last stop(). start() waits on it before reusing GL state.
   private var pendingRelease: Future<*>? = null
   private val fpsLimiter = FpsLimiter()
   private val forceRender = ForceRenderer()
@@ -148,7 +148,7 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
 
   override fun setForceRender(enabled: Boolean, fps: Int) {
     forceRender.setEnabled(enabled, fps)
-    // Apply the toggle to a render loop that is already live. start() is the only other place that
+    // GPX R11 — apply the toggle to a render loop already live. start() is the only other place that
     // reads the flag, so without this a caller that enables force-render mid-session — because the
     // camera input died and the encoder must keep producing frames for an overlay — gets nothing
     // until the next GL restart.
@@ -165,7 +165,7 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
     setForceRender(enabled, 5)
   }
 
-  // Shared by start() and the live setForceRender toggle above.
+  // GPX R11 — shared by start() and the live setForceRender toggle above.
   private val forceRenderCallback: () -> Unit = {
     executor?.execute {
       try {
@@ -177,6 +177,8 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
     Unit
   }
 
+  // GPX R11 — the working implementation of the stream-only overlay plane. OpenGlView's override of
+  // this is a no-op, so a caller typed to GlInterface loses the overlay silently.
   override fun setStreamOverlay(bitmap: Bitmap?) {
     streamOverlayRender.setBitmap(bitmap)
   }
@@ -231,6 +233,7 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
     this.photoHeight = encoderHeight
   }
 
+  // GPX R5 — capture at an explicit size rather than the encoder size.
   override fun takePhoto(width: Int, height: Int, takePhotoCallback: TakePhotoCallback?) {
     this.takePhotoCallback = takePhotoCallback
     this.photoWidth = width
@@ -238,7 +241,7 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
   }
 
   override fun start() {
-    // Do not touch shared GL state until the previous stop()'s release finished normally. get() is
+    // GPX R16 — do not touch shared GL state until the previous stop()'s release finished. get() is
     // called unconditionally, not only when the task is unfinished, so an already-failed release is
     // not skipped. Retrying belongs to the caller, not here.
     pendingRelease?.let { release ->
@@ -300,7 +303,7 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
     threadQueue.clear()
     val executor = this.executor
     if (executor != null) {
-      // shutdown, not shutdownNow: the submitted release must be allowed to run rather than raced
+      // GPX R16 — shutdown, not shutdownNow: the submitted release must run rather than be raced
       // against cancellation. submit keeps the Future alive past this bounded wait so start() can
       // observe whether it completed.
       pendingRelease = executor.submit { releaseSurfaceManagers() }
@@ -312,7 +315,7 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
       }
       this.executor = null
     } else if (pendingRelease == null) {
-      // release() can reach stop() twice; do not race a teardown that is already tracked.
+      // GPX R16 — release() can reach stop() twice; do not race a teardown already tracked.
       releaseSurfaceManagers()
     }
   }
@@ -329,7 +332,8 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
     surfaceManagerPreview.release()
     surfaceManager.release()
     mainRender.release()
-    // The EGL context that owned the overlay's GL objects is gone, so invalidate its handles. The
+    // GPX R11 — the EGL context that owned the overlay's GL objects is gone, so invalidate its
+    // handles. The
     // next draw on a fresh context re-creates them and re-uploads a still-visible bitmap.
     streamOverlayRender.release()
   }
@@ -379,7 +383,7 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
       if (surfaceManagerEncoder.makeCurrent()) {
         mainRender.drawScreenEncoder(w, h, orientation, streamOrientation,
           isStreamVerticalFlip, isStreamHorizontalFlip, streamViewPort)
-        // Drawn over the frame content into this surface only. The record encoder branch below
+        // GPX R11 — drawn over the frame content into this surface only. The record encoder branch
         // renders from the same filtered texture but never sees this.
         streamOverlayRender.draw(context)
         surfaceManagerEncoder.setPresentationTime(timestamp)

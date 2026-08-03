@@ -46,7 +46,7 @@ public class ImageStreamObject extends StreamObjectBase {
   public void load(Bitmap imageBitmap) {
     this.imageBitmap = imageBitmap;
     numFrames = 1;
-    // Verbose: load() runs per frame when an overlay bitmap is refreshed, so at info level this one
+    // GPX R10 — verbose: load() runs per frame when an overlay bitmap is refreshed, so at info this
     // line dominates logcat during streaming.
     Log.v(TAG, "finish load image");
   }

@@ -123,7 +123,7 @@ class GenericStream(
       udpClient.connect(endPoint)
     } else {
       onMainThreadHandler {
-        // Include the endpoint: without it a misconfigured URL reports the same text whatever it
+        // GPX R16b — include the endpoint: without it a misconfigured URL reports the same text
         // was, and the scheme that failed is exactly what the caller needs to see.
         connectChecker.onConnectionFailed("Unsupported protocol. Only support rtmp, rtsp and srt not $endPoint")
       }

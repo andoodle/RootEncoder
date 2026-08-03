@@ -65,13 +65,15 @@ class WhipClient(private val connectChecker: ConnectChecker) {
     //for secure transport
     private var tlsEnabled = false
     private var dtlsConnection: DtlsConnection? = null
-    // Client-role DTLS handshaker, used when the server answers a=setup:passive.
+    // GPX R14 — client-role DTLS handshaker, used when the server answers a=setup:passive.
     private var dtlsClient: DtlsClient? = null
-    // The ICE and media UDP socket, held so disconnect() can close it. As a local inside the connect
-    // job, the blocking STUN read loop kept the socket alive after a stop and STUN kept flowing.
+    // GPX R14 — the ICE and media UDP socket, held so disconnect() can close it. As a local inside
+    // the connect job, the blocking STUN read loop kept the socket alive after a stop and STUN kept
+    // flowing.
     @Volatile
     private var iceSocket: UdpStreamSocket? = null
-    // Counts media-plane packets received from the server after DTLS. For a send-only publisher these
+    // GPX R14 — counts media-plane packets received from the server after DTLS. For a send-only
+    // publisher these
     // are the server's RTCP feedback, so their presence shows the ingest is receiving the stream
     // rather than only holding the ICE session.
     private val mediaPlaneIn = AtomicLong(0)
@@ -297,7 +299,7 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                     )
                     commandsManager.writeStun(HeaderType.REQUEST, requestId, attributes, socket)
 
-                    // ICE binding check with retransmit. Sending one request and then blocking on
+                    // GPX R14 — ICE binding check with retransmit. Sending one request and blocking on
                     // readStun means an ice-lite server that does not answer that single request
                     // leaves the loop spinning on the server's own checks: it never nominates, never
                     // reaches DTLS, and reports a connection with no media. Retransmit on a short
@@ -343,7 +345,7 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                     )
                     commandsManager.writeStun(HeaderType.REQUEST, nominateId, nominateAttributes, socket)
 
-                    // Same retransmit treatment for the USE-CANDIDATE nomination.
+                    // GPX R14 — same retransmit treatment for the USE-CANDIDATE nomination.
                     var nominateSuccessReceived = false
                     var nominateAttempts = 0
                     while (!nominateSuccessReceived) {
@@ -376,7 +378,7 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                     val certificate = commandsManager.certificate ?: return@launch
                     val fingerprint = commandsManager.remoteSdpInfo?.fingerprint ?: return@launch
 
-                    // Choose the DTLS role from the answer's a=setup. A WHIP ingest that answers
+                    // GPX R14 — choose the DTLS role from the answer's a=setup. A WHIP ingest that answers
                     // "passive" is the DTLS server, so this side is the client and sends the
                     // ClientHello. Only an explicit "active" answer keeps the server-accept path.
                     // Without this, both sides wait passive: no SRTP keys, so the connection reports
@@ -439,8 +441,8 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                     Log.i(TAG, "dtls connected!!")
                     onMainThread { connectChecker.onConnectionSuccess() }
                     whipSender.setSocketsInfo(socket)
-                    // The client writes with the client key at index 0; the server writes with the
-                    // server key at index 1.
+                    // GPX R14 — the client writes with the client key at index 0; the server writes
+                    // with the server key at index 1.
                     whipSender.setCrypto(if (weAreServer) cryptoProperties[1] else cryptoProperties[0])
                     whipSender.start()
                 }.exceptionOrNull()
@@ -466,7 +468,7 @@ class WhipClient(private val connectChecker: ConnectChecker) {
         when (first) {
             in 20..63 -> dtlsTransport.enqueue(bytes)
             in 128..191 -> {
-                // RTP and RTCP are not consumed by a send-only publisher, but they are counted:
+                // GPX R14 — RTP and RTCP are not consumed by a send-only publisher, but counted:
                 // feedback arriving here means the server is receiving the stream. Log throttled.
                 val n = mediaPlaneIn.incrementAndGet()
                 if (n <= 5L || n % 50L == 0L) Log.i(TAG, "media-plane in from server: $n")
@@ -501,7 +503,8 @@ class WhipClient(private val connectChecker: ConnectChecker) {
         dtlsConnection = null
         dtlsClient?.close()
         dtlsClient = null
-        // Close the ICE and media UDP socket so an in-flight STUN read unblocks and the OS stops
+        // GPX R14 — close the ICE and media UDP socket so an in-flight STUN read unblocks and the OS
+        // stops
         // answering the server's binding checks. Without this the connect job's read loop kept STUN
         // alive after a stop and the server-side session lingered.
         runCatching { iceSocket?.close() }

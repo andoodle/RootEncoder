@@ -73,7 +73,7 @@ public interface GlInterface {
   void takePhoto(TakePhotoCallback takePhotoCallback);
 
   /**
-   * Capture an Image from Opengl at an explicit size instead of the encoder size.
+   * GPX R5 — capture an Image from Opengl at an explicit size instead of the encoder size.
    *
    * @param width pixel width of the returned bitmap.
    * @param height pixel height of the returned bitmap.
@@ -217,7 +217,7 @@ public interface GlInterface {
   void setRenderErrorCallback(RenderErrorCallback callback);
 
   /**
-   * Composite a full-frame bitmap into the stream encoder output only.
+   * GPX R11 — composite a full-frame bitmap into the stream encoder output only.
    *
    * A filter feeds the stream encoder, the record encoder, the preview and photo captures from one
    * filtered texture. This plane reaches the stream encoder alone, so a graphic meant for viewers

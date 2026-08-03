@@ -63,7 +63,8 @@ abstract class AsyncBaseRecordController : RecordController {
   private var muxerChannel: Channel<MediaFrame>? = null
   private var muxerJob: Job? = null
 
-  // Writer-side byte accounting. The muxer counts every byte it writes through countBytesWritten,
+  // GPX R12 — writer-side byte accounting. The muxer counts every byte it writes through
+  // countBytesWritten,
   // so a caller reads the exact current file size from memory rather than polling File.length(), and
   // receives one push at the rollover threshold rather than sampling for the crossing.
   @Volatile

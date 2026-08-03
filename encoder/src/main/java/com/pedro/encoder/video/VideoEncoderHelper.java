@@ -80,7 +80,7 @@ public class VideoEncoderHelper {
     byte[] csdArray = new byte[length];
     csd0byteBuffer.get(csdArray, 0, length);
     csd0byteBuffer.rewind();
-    // Some encoders hand back csd-0 as an HEVCDecoderConfigurationRecord (hvcC) instead of
+    // GPX R3b — some encoders hand back csd-0 as an HEVCDecoderConfigurationRecord (hvcC) instead of
     // Annex-B. Its first byte is configurationVersion == 1, where Annex-B always starts 0x00.
     if ((csdArray[0] & 0xFF) == 1) {
       List<ByteBuffer> hvcc = parseHvcc(csdArray);
@@ -109,7 +109,7 @@ public class VideoEncoderHelper {
       }
     }
     if (vpsPosition < 0 || spsPosition < 0 || ppsPosition < 0) return byteBufferList;
-    // The three array allocations below subtract these offsets from each other, so a csd-0 whose
+    // GPX R3b — the three array allocations below subtract these offsets from each other, so a csd-0
     // start codes are out of order or run past the buffer would size an array negatively.
     if (!(vpsPosition < spsPosition && spsPosition < ppsPosition && ppsPosition <= csdArray.length)) {
       return byteBufferList;
@@ -133,7 +133,8 @@ public class VideoEncoderHelper {
   }
 
   /**
-   * Read VPS, SPS and PPS out of an HEVCDecoderConfigurationRecord and return them with Annex-B
+   * GPX R3b — read VPS, SPS and PPS out of an HEVCDecoderConfigurationRecord and return them with
+   * Annex-B
    * start codes prepended, matching what the Annex-B path above returns.
    *
    * @return vps, sps and pps in that order, or an empty list if any of the three is missing
