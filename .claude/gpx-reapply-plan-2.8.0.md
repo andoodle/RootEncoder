@@ -31,8 +31,23 @@ later items depend on earlier ones.
 - [x] R18 — Per-encoder profile/level + negotiated-format seam — `383d55dfa` (VideoEncoder half; the StreamBase `prepareVideo` parameters are still open)
 - [x] R19 — Record codec applied coherently on a prepared encoder (redesign, see below) — `f0ae47678`
 - [x] R20 — Build green (`gradlew assembleDebug` plus `test` across all modules)
-- [ ] R21 — Tag `2.8.0-gpx1`, push branch and tag — awaiting owner approval
-- [ ] R22 — Record the two-line branch policy in this repo and in `gpxstream-app/CLAUDE.md`
+- [x] R21 — Tag `2.8.0-gpx1`, push branch and tag — `1773819bb`
+- [x] R22 — Record the two-line branch policy in this repo and in `gpxstream-app/CLAUDE.md` — `1773819bb`
+
+## After the re-apply
+
+The items above are the 2.7.5-to-2.8.0 migration. Work added to `gpx-2.8` afterwards continues
+the same numbering, so a `GPX R<N>` marker in the source and an entry here name the same change.
+The marker convention is in `.claude/gpx-branch-policy.md`.
+
+- [x] R23 — Bounded camera open in `Camera2ApiManager` (for `gpxstream-app` S3): a wait with a
+      time limit in place of `semaphore.acquireUninterruptibly()`, which parked the calling thread
+      for good when a camera never reported itself open. Three things ride with it — the post-wait
+      tail is skipped when the attempt is abandoned (it set `isRunning` and reported a camera
+      change for a camera that never opened), a generation token lets a late callback recognise
+      itself as stale and close its own camera rather than the legitimate one that replaced it,
+      and one latch per attempt replaces the shared semaphore that leaked a permit whenever a
+      camera opened and later disconnected. Tagged `2.8.0-gpx2`.
 
 ## Correction to R14's scope
 

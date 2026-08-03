@@ -48,8 +48,10 @@ import com.pedro.encoder.input.video.Camera2ResolutionCalculator.getOptimalResol
 import com.pedro.encoder.input.video.CameraHelper.Facing
 import com.pedro.encoder.input.video.facedetector.FaceDetectorCallback
 import com.pedro.encoder.input.video.facedetector.mapCamera2Faces
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
-import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -102,7 +104,27 @@ class Camera2ApiManager(context: Context) {
     var isRunning: Boolean = false
         private set
     private var fps = 30
-    private val semaphore = Semaphore(0)
+
+    /**
+     * GPX R23 — names the open attempt this manager currently wants. Every state callback
+     * registered by [openCameraId] carries the generation it was registered under and speaks only
+     * while that is still the current one; giving up on an open, or closing the camera, moves it
+     * on.
+     *
+     * The framework keeps a state callback registered after the caller has stopped waiting for
+     * it, so without this a success arriving late would assign [cameraDevice] and start a
+     * preview over whichever open replaced it — and a discard attempted from outside would close
+     * that replacement rather than the abandoned camera, having no way to tell them apart.
+     */
+    private val openGeneration = AtomicLong(0)
+
+    /**
+     * GPX R23 — how long [openCameraId] waits for the framework to resolve an open. The open
+     * callback was measured at 13-19 ms on every input of a PDT-FP1 — HDMI capture card, USB
+     * camera and the built-in sensor — so this is a liveness bound on a camera service that has
+     * stopped answering, not a latency budget a healthy open comes anywhere near.
+     */
+    private val openTimeoutMs = 3_000L
     private var cameraCallbacks: CameraCallbacks? = null
     private var requiredSize: Size? = null
     var dynamicFps = false
@@ -809,15 +831,32 @@ class Camera2ApiManager(context: Context) {
     fun openCameraId(cameraId: String) {
         this.cameraId = cameraId
         if (isPrepared) {
+            // GPX R23 — one latch per attempt, so an abandoned open cannot hand a spare permit to
+            // the next one. The shared semaphore this replaces could: a camera that opened and
+            // later disconnected released twice against the one acquire its open consumed, and
+            // the following open then returned immediately with nothing open.
+            val generation = openGeneration.incrementAndGet()
+            val resolved = CountDownLatch(1)
             val cameraHandlerThread = HandlerThread("$TAG Id = $cameraId")
             cameraHandlerThread.start()
             val handler = Handler(cameraHandlerThread.looper)
             try {
                 cameraManager.openCamera(cameraId, object: CameraDevice.StateCallback() {
                     override fun onOpened(cameraDevice: CameraDevice) {
+                        if (openGeneration.get() != generation) {
+                            // GPX R23 — given up on, and now open regardless. Closing it here
+                            // rather than leaving that to the caller is the point of the
+                            // generation: by now the manager's own field may hold a later,
+                            // legitimate camera, and a discard from outside would close that one.
+                            // onClosed then quits this attempt's handler thread.
+                            cameraDevice.close()
+                            resolved.countDown()
+                            Log.i(TAG, "Camera opened after the attempt was abandoned; discarded")
+                            return
+                        }
                         this@Camera2ApiManager.cameraDevice = cameraDevice
                         startPreview(cameraDevice, handler)
-                        semaphore.release()
+                        resolved.countDown()
                         cameraCallbacks?.onCameraOpened()
                         Log.i(TAG, "Camera opened")
                     }
@@ -829,20 +868,57 @@ class Camera2ApiManager(context: Context) {
 
                     override fun onDisconnected(cameraDevice: CameraDevice) {
                         cameraDevice.close()
-                        semaphore.release()
+                        resolved.countDown()
+                        // GPX R23 — an abandoned attempt reports to nobody; the consumer is
+                        // holding a later camera and would read this as that one failing.
+                        if (openGeneration.get() != generation) {
+                            Log.i(TAG, "An abandoned attempt disconnected; not reported")
+                            return
+                        }
                         cameraCallbacks?.onCameraDisconnected()
                         Log.i(TAG, "Camera disconnected")
                     }
 
                     override fun onError(cameraDevice: CameraDevice, i: Int) {
                         cameraDevice.close()
-                        semaphore.release()
+                        resolved.countDown()
+                        // GPX R23 — as onDisconnected: an abandoned attempt reports to nobody.
+                        if (openGeneration.get() != generation) {
+                            Log.i(TAG, "An abandoned attempt failed: $i; not reported")
+                            return
+                        }
                         cameraCallbacks?.onCameraError("Open camera failed: $i")
                         Log.e(TAG, "Open failed: $i")
                     }
 
                 }, handler)
-                semaphore.acquireUninterruptibly()
+                // GPX R23 — a bounded wait in place of `semaphore.acquireUninterruptibly()`, which
+                // had no time limit: a camera that never reported itself open parked this thread
+                // for good, freezing the app on a switch with no way back.
+                val abandonReason = try {
+                    if (resolved.await(openTimeoutMs, TimeUnit.MILLISECONDS)) null
+                    else "did not open within $openTimeoutMs ms"
+                } catch (e: InterruptedException) {
+                    // Restore what the wait cleared. Abandoning the attempt below is the same
+                    // handling a timeout gets, because it is equally unresolved.
+                    Thread.currentThread().interrupt()
+                    "was interrupted while opening"
+                }
+                if (abandonReason != null) {
+                    // GPX R23 — move the generation on, so a success arriving later recognises
+                    // itself as stale. Everything below is skipped deliberately: it sets isRunning
+                    // and reports a camera change, and a camera that has not answered has neither.
+                    //
+                    // This attempt's handler thread is left running on purpose. It is the only
+                    // route the framework has to deliver a late result, and that result is what
+                    // closes the camera; quitting the looper here would strand an open device
+                    // with nothing able to release it. A thread parked this way costs one stack
+                    // and ends when the framework finally answers.
+                    openGeneration.incrementAndGet()
+                    cameraCallbacks?.onCameraError("Camera $cameraId $abandonReason")
+                    Log.e(TAG, "Camera $cameraId $abandonReason; open abandoned")
+                    return
+                }
                 val cameraCharacteristics = cameraManager.getCameraCharacteristics(cameraId)
                 isRunning = true
                 val facing = cameraCharacteristics.secureGet(CameraCharacteristics.LENS_FACING) ?: return
@@ -955,6 +1031,10 @@ class Camera2ApiManager(context: Context) {
 
     @JvmOverloads
     fun closeCamera(resetSurface: Boolean = true) {
+        // GPX R23 — abandons any open still in flight before tearing the current one down. A close
+        // asks for no camera to be held, so an open that resolves after this point must discard
+        // itself rather than assign cameraDevice and start a preview over a closed camera.
+        openGeneration.incrementAndGet()
         isLanternEnabled = false
         zoomLevel = 1.0f
         cameraCaptureSession?.close()

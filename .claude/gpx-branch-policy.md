@@ -16,7 +16,7 @@ pinned to one cannot be moved to the other without code changes.
 | Tag line | Head tag | Consumer |
 |---|---|---|
 | `2.7.5-gpx*` | `2.7.5-gpx25` | `gpxnative-ai` |
-| `2.8.0-gpx*` | `2.8.0-gpx1` | `gpxstream-app` |
+| `2.8.0-gpx*` | `2.8.0-gpx2` | `gpxstream-app` |
 
 JitPack builds per tag, so a pin resolves the tagged commit regardless of what any branch
 does afterwards. Moving `gpx-2.8` cannot affect a consumer pinned to `2.7.5-gpx25`.
@@ -27,6 +27,27 @@ Upstream changed `BaseEncoder.type` from a MIME `String` to a `com.pedro.common.
 and deleted `getType()` and `setType()`. Any consumer that sets an encoder's codec compiles
 against one form or the other, not both. Upstream also changed several `SdpBody` factory
 signatures and moved parsers into `com.pedro.common`.
+
+## Marking GPX changes in the source
+
+**Every GPX edit carries a `GPX R<N>` marker comment at each place it changes.** One marker per
+contiguous changed region — on the KDoc of an added member, or as the first line of a changed
+block. `grep -rn "GPX R" --include=*.kt --include=*.java` then enumerates the divergence from
+upstream directly from the tree.
+
+This exists because the alternative does not survive a rebase. A GPX change was previously
+findable only from its commit message and this repo's re-apply checklist, and the next upstream
+sync rewrites the commits and starts a new checklist — so at exactly the moment someone needs to
+know "what did we change here, and why", the answer has moved out of the file.
+
+`<N>` continues the re-apply plan's item numbering (`.claude/gpx-reapply-plan-2.8.0.md`), so a
+marker and a checklist entry name the same work. The number is never reused across upstream
+syncs: a re-applied change keeps the number it was given.
+
+**Coverage today: markers start at R23.** R1–R22 were applied before this convention and carry
+none, so a grep understates the divergence — the re-apply checklist plus
+`git diff 9a9ca124f...gpx-2.8` is what enumerates those. Retro-marking them is worth doing and
+has not been done.
 
 ## Rules
 
@@ -40,9 +61,18 @@ signatures and moved parsers into `com.pedro.common`.
   it. The procedure and the item-by-item record from the 2.7.5 to 2.8.0 move are in
   `.claude/gpx-reapply-plan-2.8.0.md`.
 
-## Verification status of `2.8.0-gpx1`
+## Verification status of the `2.8.0-gpx*` line
 
-`gradlew assembleDebug test` passes across every module and the sample app. No part of this
-line has been run on a device or against a live ingest. The WHIP and Millicast behaviour it
-carries was originally established by live testing on the `2.7.5-gpx*` line; it is re-derived
-here and not re-proven. Device testing of the WHIP path is outstanding.
+`gradlew assembleDebug test` passes across every module and the sample app at both tags.
+
+**`2.8.0-gpx1` — device-proven over WHIP (2026-08-02).** On a bench PDT-FP1 the WHIP path
+reached `Streaming` against the Millicast ingest and video was watched end to end on the
+dashboard for the whole test. The stream held across a screen lock for over a minute with the
+camera retained, and switching between all three inputs was exercised on the same line. Not
+covered: duration, a degrading link, and a moving vehicle — nothing has run for hours or in
+adverse conditions.
+
+**`2.8.0-gpx2` — build-verified only.** It adds R23, the bounded camera open. The paths that
+change are the ones a healthy open never takes: the timeout, and a framework callback arriving
+for an attempt already given up on. Neither has been provoked on hardware, and a normal open is
+unaffected by construction (the wait resolves in 13-19 ms against a 3,000 ms bound).
