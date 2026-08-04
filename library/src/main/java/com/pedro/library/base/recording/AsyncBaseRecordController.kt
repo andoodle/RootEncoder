@@ -18,6 +18,7 @@ package com.pedro.library.base.recording
 import android.media.MediaCodec
 import com.pedro.common.AudioCodec
 import com.pedro.common.BitrateManager
+import com.pedro.common.BufferPool
 import com.pedro.common.TimeUtils.getCurrentTimeMicro
 import com.pedro.common.VideoCodec
 import com.pedro.common.clone
@@ -62,6 +63,7 @@ abstract class AsyncBaseRecordController : RecordController {
   private val scope = CoroutineScope(Dispatchers.IO)
   private var muxerChannel: Channel<MediaFrame>? = null
   private var muxerJob: Job? = null
+  private val bufferPool = BufferPool()
 
   // GPX R12 — writer-side byte accounting. The muxer counts every byte it writes through
   // countBytesWritten,
@@ -172,9 +174,11 @@ abstract class AsyncBaseRecordController : RecordController {
 
   private fun sendFrame(buffer: ByteBuffer, info: MediaCodec.BufferInfo, type: MediaFrame.Type) {
     if (recordStatus == RecordController.Status.STOPPED) return
+    val channel = muxerChannel ?: return
     val frameInfo = info.toMediaFrameInfo()
     val i = updateFormat(frameInfo)
-    muxerChannel?.trySend(MediaFrame(buffer.clone(), i, type))
+    val frame = MediaFrame(buffer.clone(bufferPool.acquire(buffer.limit())), i, type)
+    if (channel.trySend(frame).isFailure) bufferPool.release(frame.data)
   }
 
   override fun startRecord(
@@ -215,7 +219,13 @@ abstract class AsyncBaseRecordController : RecordController {
     muxerChannel = Channel(CAPACITY)
     muxerJob = scope.launch {
       val channel = muxerChannel ?: return@launch
-      for (frame in channel) onWriteFrame(frame)
+      for (frame in channel) {
+        try {
+          onWriteFrame(frame)
+        } finally {
+          bufferPool.release(frame.data)
+        }
+      }
     }
     this.tracks = tracks
     this.listener = listener
@@ -233,6 +243,7 @@ abstract class AsyncBaseRecordController : RecordController {
     muxerChannel = null
     muxerJob?.cancel()
     runBlocking { muxerJob?.join() }
+    bufferPool.clear()
     recordStatus = RecordController.Status.STOPPED
     clearTimestamp()
     myRequestKeyFrame = null

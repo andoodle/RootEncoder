@@ -59,12 +59,47 @@ The marker convention is in `.claude/gpx-branch-policy.md`.
       overload, points `adaptFpsRange` at it, and removes the hardcoded `cameraId == "1"` guess in
       `adaptFpsRangeDynamic` that worked around the same thing. Authorised as a deliberate second
       S3 fork change (Andy, 2026-08-03).
+- [x] R26 — Merge upstream `pedro/master` @ `58af3fb1b` (10 commits past the `9a9ca124f` base).
+      Carries no new GPX code, so it adds no `GPX R26` marker; the one hand-resolved line keeps its
+      existing `GPX patch` marker in `SrtClient.kt`. What arrives:
+      - **A buffer pool on both the send and record paths** (`6561adfec`, `0cf2ec988`). Encoded
+        frames were copied into a freshly allocated array each time; those arrays are now recycled.
+        Upstream measured roughly 750 KB/s of short-lived allocation at 6 Mbps. `BaseSender.queue`
+        became private and `sendMediaFrame` changed signature — every call site is upstream's own,
+        the fork adds none.
+      - **A source fallback in `changeVideoSource`/`changeAudioSource`** (`ec949a59c`). Unreachable
+        from `gpxstream-app`, which drives `Camera2ApiManager` directly and never calls either
+        method (S3 design decision 3).
+      - **`UrlParser` rewritten** (`3e0819a92`, `e00bcada9`) — query split off before `URI` parsing,
+        raw rather than decoded paths. Verified output-identical to the old parser for the real
+        Millicast SRT, RTMP and WHIP endpoints.
+      - **An autofocus fix** (`c1a5bad0e`). Lands in `Camera2ApiManager.kt` alongside R23 and R25
+        but inside `enableAutoFocus`/`disableAutoFocus`, which nothing calls internally and
+        `gpxstream-app` never calls.
+
+      One textual conflict, on the `SrtClient.kt` streamid line, resolved in favour of the GPX
+      patch — upstream's own fix drops the Millicast token. The reason is recorded at that line.
 - [ ] R24 — Tag `2.8.0-gpx2` and bump the pin in `gpxstream-app`'s CLAUDE.md and
       `docs/PHASE_3_PLAN.md`. **Deliberately deferred** (owner ruling 2026-08-03): a published tag
-      cannot be moved and JitPack caches per tag, so the tag is cut once S3's camera driver has
-      exercised the bounded open on the bench PDT rather than while it is build-verified only.
-      `gpxstream-app` builds against this branch meanwhile through the `rootencoder.local`
-      composite-build switch, so nothing is blocked. The pin stays at `2.8.0-gpx1` until then.
+      cannot be moved and JitPack caches per tag, so the tag is cut once the bench PDT has exercised
+      the items below rather than while they are build-verified only. `gpxstream-app` builds against
+      this branch meanwhile through the `rootencoder.local` composite-build switch, so nothing is
+      blocked. The pin stays at `2.8.0-gpx1` until then.
+
+      Bench checklist before the tag:
+      - [ ] **R23, the bounded camera open.** Its changed paths are the ones a healthy open never
+            takes — the timeout, and a framework callback arriving for an abandoned attempt. Provoke
+            them rather than waiting for them.
+      - [ ] **R25, frame-rate ranges from a named camera.** This changes every open. The old
+            behaviour was tolerated by this hardware, so the expected outcome is no visible change;
+            a *difference* is the thing to look for.
+      - [ ] **R26, the buffer pool.** The reason this is on the list rather than trusted to the
+            build: it touches every encoded frame on both the stream and the recording path, and a
+            buffer recycled while still in flight corrupts picture or sound instead of crashing.
+            Upstream ships unit tests for the pool and guards against a double release, but nothing
+            covers the in-flight case on real hardware. Watch a stream and a recording long enough
+            for the pool to reach steady state, and check the recording plays back clean — a
+            corrupt frame is far easier to see in the file than on a live viewer.
 
 ## Correction to R14's scope
 

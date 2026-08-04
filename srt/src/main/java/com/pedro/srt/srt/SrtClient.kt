@@ -23,7 +23,6 @@ import com.pedro.common.ConnectChecker
 import com.pedro.common.ConnectionFailed
 import com.pedro.common.UrlParser
 import com.pedro.common.VideoCodec
-import com.pedro.common.clone
 import com.pedro.common.frame.MediaFrame
 import com.pedro.common.onMainThread
 import com.pedro.common.socket.base.SocketType
@@ -243,6 +242,17 @@ class SrtClient(private val connectChecker: ConnectChecker) {
         val port = urlParser.port ?: 8888
         // GPX patch — getFullPath(), not path: it keeps the query string attached, which a Millicast
         // ingest expects as the streamid when the publishing token rides in the URL as "?t=".
+        //
+        // Upstream reached the same bug from the other side and its fix is deliberately not taken.
+        // Upstream falls back to getFullPath() only when the path is empty:
+        //
+        //   urlParser.getQuery("streamid") ?: urlParser.path.ifEmpty {
+        //     if (urlParser.query == null) urlParser.getFullPath() else ""
+        //   }
+        //
+        // A Millicast URL is srt://<host>:<port>/<name>?t=<token>&latency=<ms>, so the path is
+        // "<name>" — never empty — and that expression returns "<name>" with the token dropped,
+        // which the ingest rejects. Keep this line on the next upstream sync.
         val path = urlParser.getQuery("streamid") ?: urlParser.getFullPath()
         commandsManager.latency = urlParser.getQuery("latency")?.toIntOrNull() ?: commandsManager.latency
         // GPX patch — re-derive the socket read timeout from the URL latency on every connect. A host
@@ -556,13 +566,13 @@ class SrtClient(private val connectChecker: ConnectChecker) {
 
   fun sendVideo(videoBuffer: ByteBuffer, info: MediaCodec.BufferInfo) {
     if (!commandsManager.videoDisabled) {
-      srtSender.sendMediaFrame(MediaFrame(videoBuffer.clone(), info.toMediaFrameInfo(), MediaFrame.Type.VIDEO))
+      srtSender.sendMediaFrame(videoBuffer, info.toMediaFrameInfo(), MediaFrame.Type.VIDEO)
     }
   }
 
   fun sendAudio(audioBuffer: ByteBuffer, info: MediaCodec.BufferInfo) {
     if (!commandsManager.audioDisabled) {
-      srtSender.sendMediaFrame(MediaFrame(audioBuffer.clone(), info.toMediaFrameInfo(), MediaFrame.Type.AUDIO))
+      srtSender.sendMediaFrame(audioBuffer, info.toMediaFrameInfo(), MediaFrame.Type.AUDIO)
     }
   }
 

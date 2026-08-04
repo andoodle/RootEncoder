@@ -84,7 +84,8 @@ covered: duration, a degrading link, and a moving vehicle — nothing has run fo
 adverse conditions.
 
 **Branch head, ahead of `2.8.0-gpx1` and untagged — build-verified only.** It carries R23, the
-bounded camera open, and R25, frame-rate ranges asked of a named camera.
+bounded camera open; R25, frame-rate ranges asked of a named camera; and R26, the merge of upstream
+`pedro/master` @ `58af3fb1b`.
 
 R23's changed paths are the ones a healthy open never takes: the timeout, and a framework callback
 arriving for an attempt already given up on. Neither has been provoked on hardware, and a normal
@@ -95,4 +96,9 @@ carries a frame-rate range from that input's own advertised list rather than fro
 sensor's. The old behaviour was tolerated by this hardware, so the visible outcome should be no
 change; a *difference* in behaviour is the thing to look for.
 
-The tag is deliberately held until the bench pass — see R24 in the re-apply plan.
+R26 brings a buffer pool that recycles the arrays every encoded frame is copied into, on both the
+stream and the record path. A buffer reused while a frame is still in flight would corrupt picture
+or sound rather than crash, which no build can catch — so it joins the bench list.
+
+The tag is deliberately held until the bench pass — see R24 in the re-apply plan, which carries the
+checklist.
