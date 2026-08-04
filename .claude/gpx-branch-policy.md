@@ -9,7 +9,7 @@ pinned to one cannot be moved to the other without code changes.
 |---|---|---|
 | `master` | — | Mirror of `pedroSG94/RootEncoder` master. Fast-forward only, never a GPX commit. |
 | `gpx-master` | upstream `49421b686` (2026-07-20) | Frozen. The line `gpxnative-ai` builds against. |
-| `gpx-2.8` | upstream `9a9ca124f` (2026-07-30) | Active. The line `gpxstream-app` builds against. |
+| `gpx-2.8` | upstream `9a9ca124f` (2026-07-30) | Active. The line `gpxstream-app` builds against. Synced forward since; latest merged upstream is `02b8e9cce` (R27, 2026-08-04). |
 
 ## Tags and who consumes them
 
@@ -50,14 +50,17 @@ given. `GPX patch` where no item covers it — several small changes were made a
 item and were never enumerated separately. A bare `GPX patch` is preferred over guessing a number,
 because a wrong attribution is worse than an absent one.
 
-**Coverage: all 32 files that differ from upstream `9a9ca124f` carry at least one marker**
-(swept 2026-08-03). Two caveats on reading a grep as complete:
+**Coverage: all 32 files that differ from the merged upstream head carry at least one marker**
+(swept 2026-08-04 against `pedro/master` @ `02b8e9cce`). The baseline is the *merged* upstream head,
+not the branch point: since R26 and R27 brought upstream commits in, a diff against the original
+`9a9ca124f` base also lists files upstream changed, which carry no GPX work and never will. Two
+caveats on reading a grep as complete:
 
 - `StreamBase.kt` is a dense grouped rewrite where the marked regions are an index rather than a
   full inventory; its class KDoc says so.
 - A marker is a comment, so a change with nothing to attach one to may be unmarked.
 
-`git diff 9a9ca124f -- <file>` remains the authority; the markers are what make the divergence
+`git diff pedro/master -- <file>` remains the authority; the markers are what make the divergence
 legible without running it.
 
 ## Rules
@@ -84,8 +87,8 @@ covered: duration, a degrading link, and a moving vehicle — nothing has run fo
 adverse conditions.
 
 **Branch head, ahead of `2.8.0-gpx1` and untagged — build-verified only.** It carries R23, the
-bounded camera open; R25, frame-rate ranges asked of a named camera; and R26, the merge of upstream
-`pedro/master` @ `58af3fb1b`.
+bounded camera open; R25, frame-rate ranges asked of a named camera; R26, the merge of upstream
+`pedro/master` @ `58af3fb1b`; and R27, the merge of upstream `pedro/master` @ `02b8e9cce`.
 
 R23's changed paths are the ones a healthy open never takes: the timeout, and a framework callback
 arriving for an attempt already given up on. Neither has been provoked on hardware, and a normal
@@ -99,6 +102,12 @@ change; a *difference* in behaviour is the thing to look for.
 R26 brings a buffer pool that recycles the arrays every encoded frame is copied into, on both the
 stream and the record path. A buffer reused while a frame is still in flight would corrupt picture
 or sound rather than crash, which no build can catch — so it joins the bench list.
+
+R27 brings upstream's send-queue statistics, an encoder crash-recovery budget and new Camera2
+white-balance controls. The app calls none of them, and the statistics callback is a default
+method, so no app code changes. One line does change every stream start: `BaseSender.start()` now
+cancels and joins any previous send job first. That joins the bench list; the rest is either
+unreachable from this app or only reached after an encoder has already crashed.
 
 The tag is deliberately held until the bench pass — see R24 in the re-apply plan, which carries the
 checklist.

@@ -175,6 +175,8 @@ class GenericStreamClient(
   // GPX R7 — inbound-silence dead-link detection, delegated to whichever client is connected.
   override fun getInboundSilenceMs(): Long = connectedStreamClient?.getInboundSilenceMs() ?: -1L
 
+  override fun getQueueBytesOut(): Long = connectedStreamClient?.getQueueBytesOut() ?: 0L
+
   override fun getSentAudioFrames(): Long = connectedStreamClient?.getSentAudioFrames() ?: 0
 
   override fun getSentVideoFrames(): Long = connectedStreamClient?.getSentVideoFrames() ?: 0

@@ -56,6 +56,7 @@ abstract class StreamBaseClient {
    * reports a real value; protocols that do not track this return -1.
    */
   open fun getInboundSilenceMs(): Long = -1L
+  abstract fun getQueueBytesOut(): Long
   abstract fun getSentAudioFrames(): Long
   abstract fun getSentVideoFrames(): Long
   abstract fun getBytesSend(): Long

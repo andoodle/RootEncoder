@@ -61,6 +61,7 @@ import java.io.IOException
 import java.net.SocketTimeoutException
 import java.net.URISyntaxException
 import java.nio.ByteBuffer
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * Created by pedro on 20/8/23.
@@ -425,7 +426,7 @@ class SrtClient(private val connectChecker: ConnectChecker) {
   private suspend fun disconnect(clear: Boolean) {
     if (isStreaming) srtSender.stop(clear)
     runCatching {
-      withTimeoutOrNull(100) {
+      withTimeoutOrNull(100.milliseconds) {
         commandsManager.writeShutdown(socket)
       }
     }
@@ -459,7 +460,7 @@ class SrtClient(private val connectChecker: ConnectChecker) {
     jobRetry = scopeRetry.launch {
       reTries--
       disconnect(false)
-      delay(delay)
+      delay(delay.milliseconds)
       val reconnectUrl = backupUrl ?: url
       connect(reconnectUrl, true)
     }
@@ -620,6 +621,8 @@ class SrtClient(private val connectChecker: ConnectChecker) {
   }
 
   fun getItemsInCache(): Int = srtSender.getItemsInCache()
+
+  fun getQueueBytesOut(): Long = srtSender.getQueueBytesOut()
 
   /**
    * GPX R7 — milliseconds since the last inbound packet was read, or -1 when not streaming or

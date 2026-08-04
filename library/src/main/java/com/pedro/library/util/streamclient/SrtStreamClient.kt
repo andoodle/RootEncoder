@@ -92,6 +92,8 @@ class SrtStreamClient(
   // GPX R7 — SRT is the one protocol here that tracks inbound silence for real.
   override fun getInboundSilenceMs(): Long = srtClient.getInboundSilenceMs()
 
+  override fun getQueueBytesOut(): Long = srtClient.getQueueBytesOut()
+
   override fun getSentAudioFrames(): Long = srtClient.sentAudioFrames
 
   override fun getSentVideoFrames(): Long = srtClient.sentVideoFrames
