@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<!-- CANONICAL CONTENT FOR AI: the complete recap (+ AI notes) is the raw-markdown
+     block below, kept FIRST on purpose. Read just this block (Read with a line limit)
+     to get the whole recap cheaply. Source of truth; the styled body is a human VIEW. -->
+<script type="text/markdown" id="recap">
+# Upstream sync assessed, then merged as R26
+
+**Repo:** RootEncoder (fork) · **Branch:** `gpx-2.8` · **Date:** 2026-08-03 19:05
+
+Upstream `pedroSG94/RootEncoder` was 10 commits past the `9a9ca124f` base `gpx-2.8` was rebuilt on.
+Assessed all ten, found one real collision, merged everything. `gpx-2.8` head is now `36bb649ae`.
+
+## Outcome
+
+- **`master` mirror fast-forwarded** `9a9ca124f` → `58af3fb1b` and pushed. Still carries no GPX commit,
+  as the branch policy requires.
+- **All 10 upstream commits merged into `gpx-2.8` as R26.** One textual conflict, hand-resolved.
+- **`gradlew assembleDebug test` green** across every module and the sample app.
+- **GPX marker count unchanged at 125** before and after the merge — the check that no fork change
+  was silently dropped.
+- **R24's bench checklist now has three items**, not two: R23 bounded open, R25 fps ranges, and the
+  new R26 buffer pool. Tag `2.8.0-gpx2` still deliberately held; consumer pin stays `2.8.0-gpx1`.
+
+## The finding that made the assessment worth doing
+
+The session was opened on a suspicion that upstream's `e00bcada9` "fix getFullPath fallback auth" might
+have made the GPX `SrtClient.kt` patch redundant or wrong. It did neither — but the neighbouring
+`ec949a59c`-era work turned up something better.
+
+**Upstream independently found the same SRT streamid bug and fixed it in a way that breaks Millicast.**
+Upstream's version:
+
+```kotlin
+urlParser.getQuery("streamid") ?: urlParser.path.ifEmpty {
+  if (urlParser.query == null) urlParser.getFullPath() else ""
+}
+```
+
+It only falls back to `getFullPath()` when the path is **empty**. A Millicast SRT URL is
+`srt://srt-<cluster>.millicast.com:10000/<name>?t=<token>&latency=<ms>` — the path is `<name>`, never
+empty — so that expression returns `<name>` with the publishing token dropped, and the ingest rejects it.
+
+Ours (`getQuery("streamid") ?: getFullPath()`) keeps the query attached and is still correct. Both
+sides changed the same line, so it was the merge's single conflict, resolved in our favour. **The full
+reasoning is now recorded as a comment at that line** so the next upstream sync doesn't undo it — that
+comment is the durable half of this finding.
+
+## The two feared semantic collisions, both benign
+
+**`ec949a59c` "change source now fallback to last source"** — feared to reintroduce the driver-level
+camera fallback dropped as MB-CAM-15. It cannot: it lives in `StreamBase.changeVideoSource` /
+`changeAudioSource`, and **`gpxstream-app` calls neither method** (grep across the whole app: zero call
+sites). S3 design decision 3 has the app driving `Camera2ApiManager` directly instead. Dead code for us.
+
+Worth noting what the upstream change actually is, since the commit title misleads: it's a *rollback on
+failure* — if the new source fails to start, restart the previous one and rethrow — not a silent
+substitution. Also reorders `release()` after the new source starts, which is a no-op for every camera
+source (`Camera2Source.release()` is an empty body; only `ScreenSource` and `VideoFileSource` do real
+work there).
+
+**`3e0819a92` + `e00bcada9` "url parsers"** — feared to change what `getFullPath()` returns underneath
+the GPX patch. Verified it doesn't: wrote a throwaway test asserting the exact parser output for the
+real Millicast SRT, RTMP and WHIP endpoints, then **A/B'd it by swapping only `UrlParser.kt` between
+the pre-merge and post-merge versions**. Identical results both ways.
+
+The rewrite is in fact slightly more robust for us: the query is now split off before `URI` parsing, so
+a token containing a character Java's `URI` rejects can no longer break the parse.
+
+## `c1a5bad0e` autofocus — inert, despite landing in our file
+
+It lands in `Camera2ApiManager.kt`, where R23 and R25 both live, which is why it was flagged. But it's
+confined to `enableAutoFocus()` / `disableAutoFocus()`. Those are **public API only — nothing in the
+fork calls them internally**, and `gpxstream-app` never calls them. Different functions from R23/R25,
+so it auto-merged and the two coexist untouched.
+
+## Method worth reusing: the throwaway merge probe
+
+Rather than reason about conflicts from diffs, the merge was run for real first:
+
+```bash
+git worktree add --detach .claude/worktrees/probe gpx-2.8
+cp local.properties .claude/worktrees/probe/
+git -C .claude/worktrees/probe merge pedro/master
+# resolve, build, test, then remove the whole worktree
+```
+
+Detached HEAD means nothing can land on `gpx-2.8` by accident. This turned "seven files collide" into
+the precise answer — six auto-merge, one conflicts, on a known line — plus a green build, before
+touching the real branch. `git merge-tree --write-tree --name-only <a> <b>` gives the conflict list
+even faster with no worktree at all, and is the right first move next time.
+
+**Windows gotcha:** `git worktree remove --force` failed with `Filename too long` on the deep Gradle
+build dirs. It still deregistered the worktree; the leftover directory needed
+`cmd /c rmdir /s /q <path>` and then `git worktree prune`.
+
+## Sidebar answered, no fork work: autofocus and exposure
+
+Andy asked whether autofocus / tap-to-focus, and exposure, are worth having on the built-in or USB
+camera. Conclusions, so this isn't re-derived:
+
+- **Focus and exposure are separate controls.** The fork's `tapToFocus` sets `CONTROL_AF_REGIONS` only
+  — it never sets `CONTROL_AE_REGIONS` — so a tap sharpens the subject and leaves its brightness alone.
+- **Capture card:** no lens, nothing to focus, and the picture was already exposed by whatever feeds the
+  HDMI cable. `tapToFocus` self-bails there (`CONTROL_MAX_REGIONS_AF == 0` is its first check).
+- **USB camera:** genuinely unknown, needs a bench probe.
+- **The capability probe is entirely app-side** and needs no camera open — `GpxCameraSource` already
+  calls `getCameraCharacteristics` in `reportsExternal`. Fields to read: `CONTROL_AF_AVAILABLE_MODES`,
+  `LENS_INFO_MINIMUM_FOCUS_DISTANCE`, `CONTROL_MAX_REGIONS_AF`, `CONTROL_MAX_REGIONS_AE`,
+  `CONTROL_AE_AVAILABLE_MODES`, `CONTROL_AE_LOCK_AVAILABLE`, `CONTROL_AE_COMPENSATION_RANGE`.
+- **Wiring any of it up is also app-side** — the fork's focus and exposure methods are already public and
+  `GpxCameraSource` already holds the `Camera2ApiManager`. The PIT screen already has a `SurfaceView`,
+  which is what `tapToFocus(view, event)` needs.
+- **The one thing that would be a fork change (a future R27)**: making a tap set the exposure region too,
+  guarded on `CONTROL_MAX_REGIONS_AE > 0`. About four lines.
+- **Caution if it's ever wired live:** `tapToFocus` calls `session.stopRepeating()`, so frame delivery
+  briefly halts and restarts. Possibly a visible hitch on a live broadcast.
+
+Andy set this aside as app-side work. Nothing was built for it.
+
+## Open
+
+- **R24 — the bench pass, then tag `2.8.0-gpx2`.** Three items now: R23's bounded open (provoke the
+  timeout and the late callback — a healthy open never takes those paths), R25's fps ranges (expect *no*
+  visible change; a difference is the signal), and R26's buffer pool. Needs the bench PDT.
+- The buffer pool is the reason this can't be trusted to a green build: it touches every encoded frame on
+  both the stream and record path, and a buffer recycled while a frame is still in flight corrupts
+  picture or sound rather than crashing. Upstream ships unit tests and a double-release guard, but
+  nothing covers the in-flight case on hardware. **A recording is the better place to spot it than a live
+  viewer.**
+- `gpxstream-app` keeps building against this branch via the `rootencoder.local` composite-build switch,
+  so nothing is blocked by the held tag.
+
+## AI notes (scratch — optional, written by Claude for future sessions)
+
+- **A conflict is the good outcome when both sides fixed the same bug.** The instinct on seeing "upstream
+  also fixed this" is that our patch is now redundant. Here the opposite was true and only reading both
+  expressions against a *real* URL showed it. Don't resolve a conflict on the assumption upstream knows
+  better — check which one survives the actual input.
+- **"Textually clean" is not "safe", but "unreachable" is.** Two of the three feared semantic collisions
+  dissolved the moment the consumer was grepped for call sites. Check whether the app calls the changed
+  method *before* reasoning about behaviour — it's one grep and it settles the question outright.
+- **The A/B swap trick generalises.** Restoring one file from `HEAD~1` into an otherwise-merged tree and
+  re-running the same test is a cheap way to isolate whether a rewrite changed behaviour. Works whenever
+  the file is self-contained.
+- Prefer `git merge-tree --write-tree --name-only` for a first conflict read — the full probe worktree is
+  only worth it once a build is needed.
+- The `.claude/` docs on this branch (`gpx-branch-policy.md`, `gpx-reapply-plan-2.8.0.md`) are the real
+  index for this fork. Read both before touching anything; they are kept current and were updated again
+  this session.
+</script>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Upstream sync assessed, then merged as R26 — 2026-08-03 19:05</title>
+<style>
+  :root{--red-500:#EF3340;--red-700:#B3242B;--red-50:#FDECEC;--paper:#FAF8F5;--card:#FFFFFF;
+    --border:#DDD7CF;--border-subtle:#ECE7E0;--fg-1:#181512;--fg-2:#3D3833;--fg-3:#6B645C;
+    --ok:#12B76A;--attn:#F79009;--chip:#F1ECE5;
+    --font-display:"Barlow Condensed","Oswald","Segoe UI Semibold",system-ui,sans-serif;
+    --font-mono:"Roboto Mono",ui-monospace,"Cascadia Code",Consolas,Menlo,monospace;
+    --radius-md:4px;--radius-lg:8px;--shadow:0 1px 2px rgba(11,9,8,.06),0 4px 8px -2px rgba(11,9,8,.06);--maxw:880px;}
+  *{box-sizing:border-box;}html,body{margin:0;padding:0;}
+  body{background:var(--paper);color:var(--fg-2);font-family:var(--font-mono);font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 28px 72px;}
+  .topbar{max-width:var(--maxw);margin:0 auto;padding:26px 28px 0;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;}
+  .logo{display:inline-flex;align-items:center;gap:9px;}
+  .logo .flag{background:var(--red-500);color:#fff;font-family:var(--font-display);font-weight:800;font-size:17px;padding:3px 7px 2px;border-radius:2px;line-height:1;}
+  .logo .word{font-family:var(--font-display);font-weight:700;font-size:17px;letter-spacing:.14em;text-transform:uppercase;color:var(--fg-1);}
+  .doc-meta{font-size:11px;letter-spacing:.13em;text-transform:uppercase;color:var(--fg-3);text-align:right;}
+  .doc-meta .tag{color:var(--red-700);font-weight:700;}
+  .topdivide{max-width:var(--maxw);margin:16px auto 0;padding:0 28px;}.topdivide hr{border:0;border-top:2px solid var(--red-500);margin:0;}
+  .hero{padding:38px 0 4px;}
+  .eyebrow{font-size:11px;font-weight:700;letter-spacing:.26em;text-transform:uppercase;color:var(--red-700);margin:0 0 12px;}
+  h1{font-family:var(--font-display);font-weight:800;font-size:46px;line-height:1.03;text-transform:uppercase;color:var(--fg-1);margin:0 0 14px;}
+  .standfirst{font-size:16px;color:var(--fg-2);max-width:64ch;margin:0;}
+  .stats{display:flex;flex-wrap:wrap;gap:10px;margin-top:22px;}
+  .stat{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-md);padding:9px 15px;box-shadow:var(--shadow);}
+  .stat b{font-family:var(--font-display);font-weight:700;font-size:22px;color:var(--fg-1);display:block;line-height:1;margin-bottom:3px;}
+  .stat span{font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:var(--fg-3);}
+  details{padding-top:34px;border:0;}details+details{border-top:1px solid var(--border-subtle);}
+  summary{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;cursor:pointer;list-style:none;padding-top:6px;}
+  summary::-webkit-details-marker{display:none;}summary .htext{flex:1;}
+  summary .chev{font-family:var(--font-mono);font-weight:700;font-size:20px;line-height:1;color:var(--red-500);margin-top:16px;transition:transform .18s ease;user-select:none;}
+  details[open] summary .chev{transform:rotate(90deg);}summary:hover h2{color:var(--red-700);}
+  .count{font-family:var(--font-mono);font-size:12px;font-weight:700;color:var(--red-700);background:var(--red-50);border-radius:20px;padding:2px 9px;margin-left:10px;vertical-align:middle;}
+  .secbody{padding-top:14px;}
+  .sec-eyebrow{font-size:11px;font-weight:700;letter-spacing:.22em;text-transform:uppercase;color:var(--red-700);margin:0 0 8px;display:flex;align-items:center;gap:10px;}
+  .sec-eyebrow::before{content:"";width:18px;height:2px;background:var(--red-500);display:inline-block;}
+  h2{font-family:var(--font-display);font-weight:700;font-size:27px;line-height:1.1;text-transform:uppercase;color:var(--fg-1);margin:0;transition:color .12s;}
+  h3{font-family:var(--font-mono);font-weight:700;font-size:13.5px;color:var(--fg-1);margin:0 0 6px;}
+  p{margin:0 0 12px;}p:last-child{margin-bottom:0;}strong{color:var(--fg-1);font-weight:700;}
+  code{font-family:var(--font-mono);background:var(--chip);padding:.1em .4em;border-radius:3px;font-size:.86em;color:var(--fg-1);}
+  .cards{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:18px 20px;box-shadow:var(--shadow);}
+  .card .tag{display:inline-flex;align-items:center;gap:8px;font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px;}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block;}.dot.ok{background:var(--ok);}.dot.attn{background:var(--attn);}
+  .card p{font-size:13.5px;margin:0;}
+  .timeline{display:grid;}
+  .commit{display:grid;grid-template-columns:84px 1fr;gap:14px;align-items:baseline;padding:9px 0;border-bottom:1px solid var(--border-subtle);}
+  .commit:last-child{border-bottom:0;}
+  .commit .hash{background:var(--fg-1);color:#fff;font-size:11.5px;padding:3px 0;border-radius:3px;text-align:center;letter-spacing:.02em;}
+  .commit .msg{font-size:13.5px;color:var(--fg-2);}.commit .msg strong{color:var(--fg-1);}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  .nugget{background:var(--card);border:1px solid var(--border);border-left:3px solid var(--red-500);border-radius:var(--radius-md);padding:13px 16px;box-shadow:var(--shadow);}
+  .nugget h3{margin-bottom:5px;}.nugget p{font-size:12.5px;color:var(--fg-2);margin:0;}
+  ul.clean{list-style:none;margin:0;padding:0;display:grid;gap:8px;}
+  ul.clean li{position:relative;padding-left:24px;font-size:13.5px;color:var(--fg-2);}
+  ul.clean li::before{content:"";position:absolute;left:3px;top:8px;width:7px;height:7px;background:var(--red-500);border-radius:1px;transform:rotate(45deg);}
+  ul.clean li strong{color:var(--fg-1);}
+  .check{list-style:none;margin:0;padding:0;display:grid;gap:11px;}
+  .check li{position:relative;padding-left:28px;font-size:13.5px;color:var(--fg-2);}
+  .check li::before{content:"";position:absolute;left:0;top:2px;width:15px;height:15px;border:2px solid var(--attn);border-radius:3px;}
+  .check li strong{color:var(--fg-1);}
+  .snap h3{margin:16px 0 6px;}
+  pre{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:13px 16px;overflow-x:auto;font-size:12px;line-height:1.5;color:var(--fg-2);box-shadow:var(--shadow);margin:0 0 6px;}
+  pre code{background:none;padding:0;color:var(--fg-2);}
+  .resume .secbody{background:var(--fg-1);color:#EDE9E3;border-radius:var(--radius-lg);padding:20px 24px;margin-top:14px;}
+  .resume pre{background:#231e1a;border:1px solid #3a332d;color:#D9D2CA;font-size:12.5px;box-shadow:none;margin:0;}
+  .raw pre{max-height:520px;overflow:auto;font-size:11.5px;white-space:pre-wrap;word-break:break-word;}
+  .raw .hint{font-size:11px;color:var(--fg-3);margin:0 0 8px;}
+  footer{max-width:var(--maxw);margin:48px auto 0;padding:20px 28px 36px;border-top:1px solid var(--border);display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--fg-3);}
+  .controls{max-width:var(--maxw);margin:18px auto 0;padding:0 28px;text-align:right;}
+  .controls button{font-family:var(--font-mono);font-size:10.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--fg-3);background:none;border:1px solid var(--border);border-radius:20px;padding:5px 12px;cursor:pointer;}
+  .controls button:hover{color:var(--red-700);border-color:var(--red-500);}
+  @media (max-width:640px){h1{font-size:34px;}h2{font-size:23px;}.cards,.grid2{grid-template-columns:1fr;}.commit{grid-template-columns:72px 1fr;}}
+  @media print{:root{--paper:#fff;}body{background:#fff;font-size:11pt;}.card,.nugget,.stat,pre{box-shadow:none;}
+    .controls,summary .chev{display:none;}details>.secbody{display:block!important;}
+    details,.card,.nugget,.commit{page-break-inside:avoid;}*{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <span class="logo"><span class="flag">GPX</span><span class="word">Stream</span></span>
+    <span class="doc-meta"><span class="tag">Session Recap · Internal</span><br />RootEncoder · 2026-08-03</span>
+  </div>
+  <div class="topdivide"><hr /></div>
+  <div class="wrap">
+    <div class="hero">
+      <p class="eyebrow">Session Recap · 2026-08-03 19:05</p>
+      <h1>Upstream sync assessed, then merged as R26</h1>
+      <p class="standfirst">Ten upstream commits assessed, one real collision found, all ten merged into <code>gpx-2.8</code>. Upstream had independently fixed our SRT streamid bug — in a way that would have broken Millicast.</p>
+      <div class="stats">
+        <span class="stat"><b>10</b><span>commits merged</span></span>
+        <span class="stat"><b>1</b><span>conflict</span></span>
+        <span class="stat"><b>125</b><span>GPX markers, unchanged</span></span>
+        <span class="stat"><b>3</b><span>bench items open</span></span>
+      </div>
+    </div>
+    <div class="controls">
+      <button type="button" onclick="document.querySelectorAll('details').forEach(d=>d.open=true)">Expand all</button>
+      <button type="button" onclick="document.querySelectorAll('details').forEach(d=>d.open=false)">Collapse all</button>
+    </div>
+
+    <details open>
+      <summary><span class="htext"><span class="sec-eyebrow">Where things stand</span><h2>Status</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <div class="cards">
+          <div class="card">
+            <span class="tag"><span class="dot ok"></span>Merged &amp; green</span>
+            <p><code>gpx-2.8</code> head is <code>36bb649ae</code>. <code>assembleDebug test</code> passes across every module and the sample app. GPX marker count 125 before and after — nothing of ours was dropped.</p>
+          </div>
+          <div class="card">
+            <span class="tag"><span class="dot ok"></span>Mirror synced</span>
+            <p><code>master</code> fast-forwarded <code>9a9ca124f</code> → <code>58af3fb1b</code> and pushed. Still carries no GPX commit, per branch policy.</p>
+          </div>
+          <div class="card">
+            <span class="tag"><span class="dot attn"></span>Tag still held</span>
+            <p><code>2.8.0-gpx2</code> not cut. Consumer pin stays <code>2.8.0-gpx1</code>. <code>gpxstream-app</code> builds against the branch via the <code>rootencoder.local</code> composite switch, so nothing is blocked.</p>
+          </div>
+          <div class="card">
+            <span class="tag"><span class="dot attn"></span>Bench pass grew</span>
+            <p>R24's checklist is three items now, not two — the buffer pool joined R23 and R25. Needs the bench PDT.</p>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details open>
+      <summary><span class="htext"><span class="sec-eyebrow">The reason this was worth doing</span><h2>Upstream fixed our bug — wrongly</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <p>The suspicion going in was that upstream's <code>getFullPath</code> work might make the GPX <code>SrtClient.kt</code> patch redundant. It did the opposite: upstream found the <em>same</em> SRT streamid bug and fixed it in a way that drops the Millicast publishing token.</p>
+        <pre><code>// upstream — falls back to getFullPath() only when the path is EMPTY
+urlParser.getQuery("streamid") ?: urlParser.path.ifEmpty {
+  if (urlParser.query == null) urlParser.getFullPath() else ""
+}</code></pre>
+        <p>A Millicast SRT URL is <code>srt://srt-&lt;cluster&gt;.millicast.com:10000/&lt;name&gt;?t=&lt;token&gt;&amp;latency=&lt;ms&gt;</code>. The path is <code>&lt;name&gt;</code> — never empty — so upstream's expression returns the name alone and the ingest rejects it. Ours keeps the query attached.</p>
+        <p>Both sides changed the same line, so it was the merge's one conflict. <strong>The full reasoning now lives as a comment at that line</strong>, so the next sync doesn't quietly undo it. That comment is the durable half of this finding.</p>
+      </div>
+    </details>
+
+    <details>
+      <summary><span class="htext"><span class="sec-eyebrow">Feared, then cleared</span><h2>The semantic collisions<span class="count">3</span></h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <div class="grid2">
+          <div class="nugget">
+            <h3>Source fallback — unreachable</h3>
+            <p><code>ec949a59c</code> lives in <code>StreamBase.changeVideoSource</code>/<code>changeAudioSource</code>. <code>gpxstream-app</code> calls neither — zero call sites across the app. S3 decision 3 has it driving <code>Camera2ApiManager</code> directly. Also: the change is a <em>rollback on failure</em>, not a silent substitution, so the title misleads.</p>
+          </div>
+          <div class="nugget">
+            <h3>UrlParser — output-identical</h3>
+            <p>Proven, not assumed: a test asserting parser output for the real Millicast SRT, RTMP and WHIP endpoints, run against both the old and new <code>UrlParser.kt</code> in the same tree. Same answers. The rewrite is marginally more robust — the query is split off before <code>URI</code> parsing.</p>
+          </div>
+          <div class="nugget">
+            <h3>Autofocus — inert</h3>
+            <p><code>c1a5bad0e</code> lands in <code>Camera2ApiManager.kt</code> beside R23 and R25, but inside <code>enableAutoFocus</code>/<code>disableAutoFocus</code>. Nothing in the fork calls them internally and the app never calls them. Auto-merged; the three coexist.</p>
+          </div>
+          <div class="nugget">
+            <h3>Buffer pool — the one real risk</h3>
+            <p>Touches every encoded frame on both the stream and record path. Our R12 reports write failures through the listener rather than throwing, so upstream's new release-in-<code>finally</code> is undisturbed. But a buffer recycled in-flight corrupts media rather than crashing — hence the bench item.</p>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details>
+      <summary><span class="htext"><span class="sec-eyebrow">Worth reusing</span><h2>Method &amp; gotchas</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <p>The merge was run for real before touching the branch — on a <strong>detached-HEAD throwaway worktree</strong>, so nothing could land on <code>gpx-2.8</code> by accident.</p>
+        <pre><code>git worktree add --detach .claude/worktrees/probe gpx-2.8
+cp local.properties .claude/worktrees/probe/
+git -C .claude/worktrees/probe merge pedro/master
+# resolve, build, test, then delete the worktree entirely</code></pre>
+        <ul class="clean">
+          <li><strong>Faster first read:</strong> <code>git merge-tree --write-tree --name-only &lt;a&gt; &lt;b&gt;</code> gives the conflict list with no worktree at all. Reach for the probe only once a build is needed.</li>
+          <li><strong>The A/B swap:</strong> restoring one file from <code>HEAD~1</code> into an otherwise-merged tree and re-running the same test isolates whether a rewrite changed behaviour. Works for any self-contained file.</li>
+          <li><strong>Windows:</strong> <code>git worktree remove --force</code> failed with <code>Filename too long</code> on deep Gradle dirs. It still deregistered the worktree; clean up with <code>cmd /c rmdir /s /q &lt;path&gt;</code> then <code>git worktree prune</code>.</li>
+        </ul>
+      </div>
+    </details>
+
+    <details>
+      <summary><span class="htext"><span class="sec-eyebrow">Answered, no code written</span><h2>Focus &amp; exposure sidebar</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <p>Andy asked whether autofocus, tap-to-focus and exposure are worth having on the built-in or USB camera. Set aside as app-side work — recorded here so it isn't re-derived.</p>
+        <ul class="clean">
+          <li><strong>Focus ≠ exposure.</strong> The fork's <code>tapToFocus</code> sets <code>CONTROL_AF_REGIONS</code> only, never <code>CONTROL_AE_REGIONS</code>. A tap sharpens the subject and leaves brightness alone.</li>
+          <li><strong>Capture card:</strong> no lens, and the picture was already exposed upstream of the phone. <code>tapToFocus</code> self-bails on <code>CONTROL_MAX_REGIONS_AF == 0</code>.</li>
+          <li><strong>USB camera:</strong> genuinely unknown — wants a bench probe.</li>
+          <li><strong>The probe is app-side and needs no camera open.</strong> <code>GpxCameraSource</code> already calls <code>getCameraCharacteristics</code>. Read <code>CONTROL_AF_AVAILABLE_MODES</code>, <code>LENS_INFO_MINIMUM_FOCUS_DISTANCE</code>, <code>CONTROL_MAX_REGIONS_AF</code>, <code>CONTROL_MAX_REGIONS_AE</code>, <code>CONTROL_AE_AVAILABLE_MODES</code>, <code>CONTROL_AE_LOCK_AVAILABLE</code>, <code>CONTROL_AE_COMPENSATION_RANGE</code>.</li>
+          <li><strong>The only possible fork change (future R27):</strong> make a tap set the exposure region too, guarded on <code>CONTROL_MAX_REGIONS_AE &gt; 0</code>. ~4 lines.</li>
+          <li><strong>Caution:</strong> <code>tapToFocus</code> calls <code>stopRepeating()</code> — frames halt and restart. Possibly a visible hitch live.</li>
+        </ul>
+      </div>
+    </details>
+
+    <details open>
+      <summary><span class="htext"><span class="sec-eyebrow">Still open</span><h2>R24 bench pass</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <ul class="check">
+          <li><strong>R23 — bounded camera open.</strong> Provoke the timeout and the late callback. A healthy open never takes those paths, so waiting won't exercise them.</li>
+          <li><strong>R25 — fps ranges from a named camera.</strong> Changes every open, but this hardware tolerated the old behaviour, so expect <em>no</em> visible change. A difference is the signal.</li>
+          <li><strong>R26 — the buffer pool.</strong> Run a stream and a recording long enough for the pool to reach steady state, then play the recording back. A corrupt frame is far easier to see in the file than on a live viewer.</li>
+        </ul>
+        <p style="margin-top:14px;">Once green: cut <code>2.8.0-gpx2</code> and bump the pin in <code>gpxstream-app</code>'s <code>CLAUDE.md</code> and <code>docs/PHASE_3_PLAN.md</code>.</p>
+      </div>
+    </details>
+
+    <details class="raw">
+      <summary><span class="htext"><span class="sec-eyebrow">For the record</span><h2>Full Record + AI Notes</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <p class="hint">Complete raw recap + Claude's scratch notes — the same canonical block the AI reads from the top of this file.</p>
+        <pre id="fullmd"></pre>
+      </div>
+    </details>
+  </div>
+  <footer><span>GPX Stream · Session Recap · 2026-08-03 19:05</span><span>Internal — RootEncoder</span></footer>
+  <script>document.getElementById('fullmd').textContent=document.getElementById('recap').textContent.trim();</script>
+</body>
+</html>
