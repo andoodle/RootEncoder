@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<!-- CANONICAL CONTENT FOR AI: the complete recap (+ AI notes) is the raw-markdown
+     block below, kept FIRST on purpose. Read just this block (Read with a line limit)
+     to get the whole recap cheaply. Source of truth; the styled body is a human VIEW. -->
+<script type="text/markdown" id="recap">
+# Upstream sync assessed and merged as R27
+
+**Repo:** RootEncoder fork, worktree `.claude/worktrees/gpx-2.8`, branch `gpx-2.8`
+**Date:** 2026-08-04 15:36 local
+**Outcome:** upstream `pedro/master` @ `02b8e9cce` merged as R27. Every GPX item R1–R26 assessed
+against Andy's take-theirs ruling; none retired, none narrowed. Fork and app both build green.
+Bench QA outstanding.
+
+## The task
+
+Andy's ruling (2026-08-04): where Pedro's team has improved the library so one of our patches is no
+longer necessary, drop ours and take theirs — but only where no functionality is lost. Each GPX item
+gets one of three outcomes: retire (upstream covers it, verified by reading upstream's code),
+keep-and-re-apply, or keep-but-narrow.
+
+R26 (2026-08-03) was the worked precedent for this exact task, so this session followed its shape.
+
+## What upstream shipped
+
+18 commits past the R26 base `58af3fb1b`, 14 non-merge, across 28 files. Four groups:
+
+1. **Per-second send-queue statistics** (`beabe65f7`, `fa94f2450`, `412ef4321`, `8aa5d20bf`,
+   `575302c18`, `a3937a883`, `0c3ce57c7`, `ce56cb794`). `BitrateChecker` gains a default
+   `onStreamingStats(StreamingStatsReport)`; a new `StreamingStatsMonitor` classifies the send
+   queue's byte trend over a three-sample window as `SUFFICIENT` / `INSUFFICIENT` / `UNKNOWN`, plus
+   a congestion percentage. `BaseSender.start()` became `suspend` and cancels-and-joins any previous
+   job first. `hasCongestion` re-expressed through the same percentage, meaning unchanged.
+2. **Encoder crash-recovery budget** (`d27a7d2f8`). At most three resets in a 30-second window, then
+   the encoder stops rather than looping. `codec` and `executorService` became `volatile`; the
+   API-below-23 read loop hands recovery to its own thread; `getDataFromEncoder` null-checks the
+   codec. Same commit makes `chooseColorDynamically` prefer YUV420PLANAR over whatever the vendor
+   lists first.
+3. **Camera2 white-balance lock and tap-to-meter** (`af42307cc`, `402b08c57`, `06ff1138b`,
+   `daaeae0eb`). New AWB-lock and tap-to-meter AE/AWB entry points, metering regions cleared to a
+   zero-size `METERING_WEIGHT_DONT_CARE` rect before an auto mode is re-applied, and `closeCamera`
+   resets the two lock flags.
+4. **ktor 3.5.2** (`27ec9a918`).
+
+## The assessment — nothing retired
+
+Nine files carry a `GPX` marker *and* were touched by upstream this round; those were read line by
+line, and the rest were confirmed absent from upstream's 28-file change set. Every item is
+**keep and re-apply**. The per-item table with reasons lives in
+`.claude/gpx-reapply-plan-2.8.0.md` under R27. The three that looked like genuine retire candidates
+before reading the code, and why each survived:
+
+- **R7 (SRT inbound-silence)** vs upstream's `INSUFFICIENT` throughput verdict. Different fault.
+  R7 detects a UDP blackhole — `sendto` keeps succeeding, nothing comes back — and *fails the
+  connection*. Upstream's verdict is advisory and reads the send queue, which also grows on a
+  congested but perfectly alive link.
+- **R12 (writer-side byte counter)** vs upstream's `getQueueBytesOut` / `totalBytesOut`. Different
+  path. R12 counts bytes reaching the *recording file* through the muxer and makes a write failure
+  visible; upstream counts bytes queued on the *send* path. The two record controllers weren't
+  touched this sync at all.
+- **R19 (`volatile prepared` / `isPrepared()`)** vs upstream making `codec` and `executorService`
+  volatile. Upstream made the two neighbouring fields volatile but not `prepared` — and its new
+  budget-exhausted branch writes `prepared` from the callback thread, which *strengthens* R19's
+  original reason rather than removing it.
+
+## The merge
+
+Six conflicts, all resolved by keeping the GPX change and taking upstream's beside it.
+
+- **Pure adjacency (3):** `GenericStreamClient`, `SrtStreamClient`, `StreamBaseClient` — R7's
+  `getInboundSilenceMs` and upstream's `getQueueBytesOut` were added at the same line.
+- **`Camera2ApiManager`:** R23's `openGeneration.incrementAndGet()` and upstream's two lock resets
+  both at the top of `closeCamera`. Generation bump kept **first** — it must precede the teardown.
+- **`BaseEncoder` (substantive):** R9's conditional timestamp baseline now sits above upstream's
+  three reset-budget initialisers in `start(long)`; R19's `volatile prepared` sits beside upstream's
+  two new counters in the field block.
+- **`AudioEncoder` (substantive):** see below.
+
+**One GPX-adjacent line dropped in favour of upstream's.** `AudioEncoder.start(boolean)` no longer
+carries `shouldReset = resetTs`. Upstream deleted that line from both `AudioEncoder` and
+`VideoEncoder` and moved the assignment into `BaseEncoder.start(long)`, because with a reset budget
+a `restart()` must not quietly clear the flag. **The line was never a GPX change** — R9 only added
+the `forceContinuousTs` guard on the `tsBuffer` reset immediately above it. The `VideoEncoder` half
+merged with no conflict at all, which is the tell.
+
+## Verification
+
+- Fork: `gradlew assembleDebug` and `gradlew test` green across all modules and the sample app
+  (upstream's new `StreamingStatsMonitorTest` included).
+- App: `gradlew -Prootencoder.local=true build` green from
+  `gpxstream-app/.claude/worktrees/s3-camera-input`; `check_docs.py` and `check_trackers.py` clean.
+- **GPX marker inventory byte-identical before and after the merge** — 24 distinct tags, same
+  counts. This is the check that proves no patch was silently lost to an auto-resolved hunk, and
+  it's cheap: `git grep -h -o -E "GPX (R[0-9]+[a-z]?|patch)" <pre-merge-sha> -- "*.kt" "*.java"`
+  piped through `sort | uniq -c`, diffed against the same on the working tree.
+- Read the four app-critical behaviours in the merged source rather than trusting the build: R23's
+  bounded open (bounded wait, tail skipped on abandon, stale attempt closes its own device, one
+  latch per attempt), R25's `getSupportedFps(size, cameraId)` and both `adaptFpsRange` call sites,
+  `GlStreamInterface`'s four members, and `Camera2ApiManager`'s `setCameraId` / plain
+  `prepareCamera` / `setRequiredResolution` / `enableFrameCaptureCallback`. All intact.
+
+## Reachability from gpxstream-app
+
+Nothing upstream added this round is called by the app:
+
+- `onStreamingStats` is a **default** method on `BitrateChecker`; `PublisherConnectChecker` doesn't
+  override it. Visible cost is one no-op main-thread post per second per stream.
+- `chooseColorDynamically` runs only when `formatVideoEncoder == YUV420Dynamical`. The app encodes
+  from a GL surface and never sets that. Unreachable.
+- The Camera2 AWB-lock and tap-to-meter APIs are additive; the app calls none of them.
+- The one line that *does* change every stream start is `BaseSender.start()` now cancelling and
+  joining a previous send job. Added to R24's bench checklist.
+
+## Documentation updated in the same commit
+
+- `.claude/gpx-reapply-plan-2.8.0.md` — R27 entry, the per-item outcome table under the ruling, and
+  a fourth bench item under R24.
+- `.claude/gpx-branch-policy.md` — R27 in the branch-head verification status and a paragraph on
+  what it means for the app.
+- **Fixed a stale claim while there:** the marker-coverage line said "all 32 files that differ from
+  upstream `9a9ca124f`". That baseline broke the moment R26 merged upstream commits in — a diff
+  against the original branch point now also lists files *upstream* changed, which carry no GPX work
+  and never will. It reported 78 files. Rebased the claim on the merged upstream head
+  (`pedro/master`), where it's 32 files and every one carries a marker. The `git diff` authority
+  line at the end of that section was pointing at the same dead baseline; fixed too.
+
+## Housekeeping
+
+`master` (the upstream mirror branch) fast-forwarded `58af3fb1b` → `02b8e9cce` via
+`git push . pedro/master:master`, which refuses a non-fast-forward. Branch policy requires this on
+every sync. `gpx-master` and the `2.7.5-gpx*` line untouched.
+
+## Still open
+
+- **Bench QA on the PDT.** R24's checklist now has four items: R23 bounded open, R25 named-camera
+  fps, R26 buffer pool, R27 send-job restart. Needs Andy's hands — the app must be launched by hand,
+  never from adb.
+- **No tag cut.** `2.8.0-gpx2` stays deferred (Andy, 2026-08-04) until the app's rebuild finishes;
+  the app keeps building from branch source through `-Prootencoder.local=true`. Pin stays at
+  `2.8.0-gpx1`.
+
+## AI notes (scratch — optional, written by Claude for future sessions)
+
+- **The marker-count diff is the single highest-value check in this whole task.** Six conflicts were
+  visible and got attention; the risk that actually matters is a *silently* auto-merged hunk eating a
+  GPX line. Comparing `git grep -o "GPX R.." | sort | uniq -c` before and after catches that in one
+  command. Run it on every future sync, right after resolving.
+- **"Upstream touched the same file" is not "upstream touched our patch."** `Camera2ApiManager` got
+  +110 lines this round and it read alarming, but all of it was in the AE/AWB request builders.
+  Intersecting *file* lists is only the shortlist; the decision needs the hunks.
+- **The `shouldReset` line is a good template for the ruling.** The tell that it was safe to drop
+  wasn't reasoning about semantics — it was that `VideoEncoder`'s identical line merged with **no
+  conflict**, proving the fork never touched it. When deciding whether a line is ours, check whether
+  git thinks it's ours.
+- **App-repo docs were checked and deliberately not changed.** `gpxstream-app/CLAUDE.md` says the
+  pin is `2.8.0-gpx1` "built on upstream `9a9ca124f`" — that sentence is about the *tag*, the tag
+  hasn't moved, and R24 explicitly holds it. It's accurate. Don't "fix" it on the next sync either;
+  it becomes wrong only when the pin moves.
+- A parallel session was live in the `gpxstream-app` s3-camera-input worktree and fixed a
+  `CameraCore.kt` compile error mid-run — the first full app build failed on it, the second passed
+  with no action here. If an app build fails in a module with no RootEncoder dependency, check
+  `git status` for someone else's in-flight edit before assuming the merge broke something.
+</script>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Upstream sync merged as R27 — 2026-08-04 15:36</title>
+<style>
+  :root{--red-500:#EF3340;--red-700:#B3242B;--red-50:#FDECEC;--paper:#FAF8F5;--card:#FFFFFF;
+    --border:#DDD7CF;--border-subtle:#ECE7E0;--fg-1:#181512;--fg-2:#3D3833;--fg-3:#6B645C;
+    --ok:#12B76A;--attn:#F79009;--chip:#F1ECE5;
+    --font-display:"Barlow Condensed","Oswald","Segoe UI Semibold",system-ui,sans-serif;
+    --font-mono:"Roboto Mono",ui-monospace,"Cascadia Code",Consolas,Menlo,monospace;
+    --radius-md:4px;--radius-lg:8px;--shadow:0 1px 2px rgba(11,9,8,.06),0 4px 8px -2px rgba(11,9,8,.06);--maxw:880px;}
+  *{box-sizing:border-box;}html,body{margin:0;padding:0;}
+  body{background:var(--paper);color:var(--fg-2);font-family:var(--font-mono);font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 28px 72px;}
+  .topbar{max-width:var(--maxw);margin:0 auto;padding:26px 28px 0;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;}
+  .logo{display:inline-flex;align-items:center;gap:9px;}
+  .logo .flag{background:var(--red-500);color:#fff;font-family:var(--font-display);font-weight:800;font-size:17px;padding:3px 7px 2px;border-radius:2px;line-height:1;}
+  .logo .word{font-family:var(--font-display);font-weight:700;font-size:17px;letter-spacing:.14em;text-transform:uppercase;color:var(--fg-1);}
+  .doc-meta{font-size:11px;letter-spacing:.13em;text-transform:uppercase;color:var(--fg-3);text-align:right;}
+  .doc-meta .tag{color:var(--red-700);font-weight:700;}
+  .topdivide{max-width:var(--maxw);margin:16px auto 0;padding:0 28px;}.topdivide hr{border:0;border-top:2px solid var(--red-500);margin:0;}
+  .hero{padding:38px 0 4px;}
+  .eyebrow{font-size:11px;font-weight:700;letter-spacing:.26em;text-transform:uppercase;color:var(--red-700);margin:0 0 12px;}
+  h1{font-family:var(--font-display);font-weight:800;font-size:46px;line-height:1.03;text-transform:uppercase;color:var(--fg-1);margin:0 0 14px;}
+  .standfirst{font-size:16px;color:var(--fg-2);max-width:64ch;margin:0;}
+  .stats{display:flex;flex-wrap:wrap;gap:10px;margin-top:22px;}
+  .stat{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-md);padding:9px 15px;box-shadow:var(--shadow);}
+  .stat b{font-family:var(--font-display);font-weight:700;font-size:22px;color:var(--fg-1);display:block;line-height:1;margin-bottom:3px;}
+  .stat span{font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:var(--fg-3);}
+  details{padding-top:34px;border:0;}details+details{border-top:1px solid var(--border-subtle);}
+  summary{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;cursor:pointer;list-style:none;padding-top:6px;}
+  summary::-webkit-details-marker{display:none;}summary .htext{flex:1;}
+  summary .chev{font-family:var(--font-mono);font-weight:700;font-size:20px;line-height:1;color:var(--red-500);margin-top:16px;transition:transform .18s ease;user-select:none;}
+  details[open] summary .chev{transform:rotate(90deg);}summary:hover h2{color:var(--red-700);}
+  .count{font-family:var(--font-mono);font-size:12px;font-weight:700;color:var(--red-700);background:var(--red-50);border-radius:20px;padding:2px 9px;margin-left:10px;vertical-align:middle;}
+  .secbody{padding-top:14px;}
+  .sec-eyebrow{font-size:11px;font-weight:700;letter-spacing:.22em;text-transform:uppercase;color:var(--red-700);margin:0 0 8px;display:flex;align-items:center;gap:10px;}
+  .sec-eyebrow::before{content:"";width:18px;height:2px;background:var(--red-500);display:inline-block;}
+  h2{font-family:var(--font-display);font-weight:700;font-size:27px;line-height:1.1;text-transform:uppercase;color:var(--fg-1);margin:0;transition:color .12s;}
+  h3{font-family:var(--font-mono);font-weight:700;font-size:13.5px;color:var(--fg-1);margin:0 0 6px;}
+  p{margin:0 0 12px;}p:last-child{margin-bottom:0;}strong{color:var(--fg-1);font-weight:700;}
+  code{font-family:var(--font-mono);background:var(--chip);padding:.1em .4em;border-radius:3px;font-size:.86em;color:var(--fg-1);}
+  .cards{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:18px 20px;box-shadow:var(--shadow);}
+  .card .tag{display:inline-flex;align-items:center;gap:8px;font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px;}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block;}.dot.ok{background:var(--ok);}.dot.attn{background:var(--attn);}
+  .card p{font-size:13.5px;margin:0;}
+  .timeline{display:grid;}
+  .commit{display:grid;grid-template-columns:84px 1fr;gap:14px;align-items:baseline;padding:9px 0;border-bottom:1px solid var(--border-subtle);}
+  .commit:last-child{border-bottom:0;}
+  .commit .hash{background:var(--fg-1);color:#fff;font-size:11.5px;padding:3px 0;border-radius:3px;text-align:center;letter-spacing:.02em;}
+  .commit .msg{font-size:13.5px;color:var(--fg-2);}.commit .msg strong{color:var(--fg-1);}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  .nugget{background:var(--card);border:1px solid var(--border);border-left:3px solid var(--red-500);border-radius:var(--radius-md);padding:13px 16px;box-shadow:var(--shadow);}
+  .nugget h3{margin-bottom:5px;}.nugget p{font-size:12.5px;color:var(--fg-2);margin:0;}
+  ul.clean{list-style:none;margin:0;padding:0;display:grid;gap:8px;}
+  ul.clean li{position:relative;padding-left:24px;font-size:13.5px;color:var(--fg-2);}
+  ul.clean li::before{content:"";position:absolute;left:3px;top:8px;width:7px;height:7px;background:var(--red-500);border-radius:1px;transform:rotate(45deg);}
+  ul.clean li strong{color:var(--fg-1);}
+  .check{list-style:none;margin:0;padding:0;display:grid;gap:11px;}
+  .check li{position:relative;padding-left:28px;font-size:13.5px;color:var(--fg-2);}
+  .check li::before{content:"";position:absolute;left:0;top:2px;width:15px;height:15px;border:2px solid var(--attn);border-radius:3px;}
+  .check li strong{color:var(--fg-1);}
+  .snap h3{margin:16px 0 6px;}
+  pre{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:13px 16px;overflow-x:auto;font-size:12px;line-height:1.5;color:var(--fg-2);box-shadow:var(--shadow);margin:0 0 6px;}
+  pre code{background:none;padding:0;color:var(--fg-2);}
+  .resume .secbody{background:var(--fg-1);color:#EDE9E3;border-radius:var(--radius-lg);padding:20px 24px;margin-top:14px;}
+  .resume pre{background:#231e1a;border:1px solid #3a332d;color:#D9D2CA;font-size:12.5px;box-shadow:none;margin:0;}
+  .raw pre{max-height:520px;overflow:auto;font-size:11.5px;white-space:pre-wrap;word-break:break-word;}
+  .raw .hint{font-size:11px;color:var(--fg-3);margin:0 0 8px;}
+  footer{max-width:var(--maxw);margin:48px auto 0;padding:20px 28px 36px;border-top:1px solid var(--border);display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--fg-3);}
+  .controls{max-width:var(--maxw);margin:18px auto 0;padding:0 28px;text-align:right;}
+  .controls button{font-family:var(--font-mono);font-size:10.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--fg-3);background:none;border:1px solid var(--border);border-radius:20px;padding:5px 12px;cursor:pointer;}
+  .controls button:hover{color:var(--red-700);border-color:var(--red-500);}
+  @media (max-width:640px){h1{font-size:34px;}h2{font-size:23px;}.cards,.grid2{grid-template-columns:1fr;}.commit{grid-template-columns:72px 1fr;}}
+  @media print{:root{--paper:#fff;}body{background:#fff;font-size:11pt;}.card,.nugget,.stat,pre{box-shadow:none;}
+    .controls,summary .chev{display:none;}details>.secbody{display:block!important;}
+    details,.card,.nugget,.commit{page-break-inside:avoid;}*{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <span class="logo"><span class="flag">GPX</span><span class="word">Stream</span></span>
+    <span class="doc-meta"><span class="tag">Session Recap · Internal</span><br />RootEncoder fork · 2026-08-04</span>
+  </div>
+  <div class="topdivide"><hr /></div>
+  <div class="wrap">
+    <div class="hero">
+      <p class="eyebrow">Session Recap · 2026-08-04 15:36</p>
+      <h1>Upstream sync merged as R27</h1>
+      <p class="standfirst">Upstream <code>pedro/master</code> @ <code>02b8e9cce</code> merged into <code>gpx-2.8</code>. Every GPX patch assessed against Andy's take-theirs ruling — none retired, none narrowed. Fork and app both build green; bench QA outstanding.</p>
+      <div class="stats">
+        <div class="stat"><b>18</b><span>upstream commits</span></div>
+        <div class="stat"><b>6</b><span>conflicts resolved</span></div>
+        <div class="stat"><b>0</b><span>patches retired</span></div>
+        <div class="stat"><b>24</b><span>GPX markers intact</span></div>
+      </div>
+    </div>
+    <div class="controls">
+      <button type="button" onclick="document.querySelectorAll('details').forEach(d=>d.open=true)">Expand all</button>
+      <button type="button" onclick="document.querySelectorAll('details').forEach(d=>d.open=false)">Collapse all</button>
+    </div>
+
+    <details open>
+      <summary><span class="htext"><span class="sec-eyebrow">Where things stand</span><h2>Status</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <div class="cards">
+          <div class="card">
+            <span class="tag"><span class="dot ok"></span>Merged &amp; verified</span>
+            <p>Fork <code>assembleDebug</code> + <code>test</code> green across all modules. App <code>build</code> green against branch source. <code>check_docs.py</code> and <code>check_trackers.py</code> clean. <code>master</code> mirror fast-forwarded.</p>
+          </div>
+          <div class="card">
+            <span class="tag"><span class="dot attn"></span>Bench QA outstanding</span>
+            <p>The merge touches the encoders, so R24's bench checklist gained a fourth item. Needs Andy's hands on the PDT — the app must be launched manually, never from adb.</p>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details open>
+      <summary><span class="htext"><span class="sec-eyebrow">The decision Andy asked for</span><h2>Nothing retired</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <p>Upstream's three areas of work this round — send-queue statistics, an encoder reset budget, camera white-balance controls — don't overlap any GPX patch. Every item is <strong>keep and re-apply</strong>. The three that looked like genuine retire candidates until the code was read:</p>
+        <div class="grid2">
+          <div class="nugget">
+            <h3>R7 survives</h3>
+            <p>Upstream's <code>INSUFFICIENT</code> verdict reads the <em>send queue</em>, which also grows on a congested-but-alive link. R7 detects a UDP blackhole and <em>fails the connection</em>. Different fault.</p>
+          </div>
+          <div class="nugget">
+            <h3>R12 survives</h3>
+            <p>Upstream counts bytes queued on the send path. R12 counts bytes reaching the <em>recording file</em> and surfaces a write failure. The record controllers weren't touched at all.</p>
+          </div>
+          <div class="nugget">
+            <h3>R19 survives, stronger</h3>
+            <p>Upstream made <code>codec</code> and <code>executorService</code> volatile but not <code>prepared</code> — and its new budget-exhausted branch writes <code>prepared</code> from the callback thread. That's R19's argument, not a replacement for it.</p>
+          </div>
+          <div class="nugget">
+            <h3>One line did go</h3>
+            <p><code>AudioEncoder</code>'s <code>shouldReset = resetTs</code>. Upstream moved that assignment up to <code>BaseEncoder</code>. It was never a GPX change — the tell is that <code>VideoEncoder</code>'s identical line merged with no conflict.</p>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details>
+      <summary><span class="htext"><span class="sec-eyebrow">What arrived</span><h2>Upstream changes<span class="count">4 groups</span></h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <ul class="clean">
+          <li><strong>Per-second send-queue statistics.</strong> A default <code>onStreamingStats</code> on <code>BitrateChecker</code>, backed by a monitor that classifies the queue's byte trend. <code>BaseSender.start()</code> became <code>suspend</code>.</li>
+          <li><strong>Encoder crash-recovery budget.</strong> Three resets in 30 seconds, then stop instead of looping. Two fields became volatile.</li>
+          <li><strong>Camera2 white-balance lock and tap-to-meter.</strong> New AE/AWB entry points; metering regions cleared before an auto mode is re-applied.</li>
+          <li><strong>ktor 3.5.2.</strong></li>
+        </ul>
+        <p style="margin-top:14px;">None of it is reachable from gpxstream-app. <code>onStreamingStats</code> is a default method the app doesn't override; the new color-format logic runs only for <code>YUV420Dynamical</code> and the app encodes from a GL surface; the camera APIs are additive. The one line that changes every stream start is <code>BaseSender.start()</code> cancelling a previous send job — that's the bench item.</p>
+      </div>
+    </details>
+
+    <details>
+      <summary><span class="htext"><span class="sec-eyebrow">Worth remembering</span><h2>Gotchas<span class="count">3</span></h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <div class="grid2">
+          <div class="nugget">
+            <h3>The marker-count diff is the check that matters</h3>
+            <p>Six conflicts were visible and got attention. The real risk is a <em>silently</em> auto-merged hunk eating a GPX line. Diffing <code>git grep -o "GPX R.." | sort | uniq -c</code> before and after catches it in one command. Run it every sync.</p>
+          </div>
+          <div class="nugget">
+            <h3>Same file ≠ same patch</h3>
+            <p><code>Camera2ApiManager</code> got +110 upstream lines and read alarming; all of it was in the AE/AWB request builders. Intersecting file lists gives you the shortlist, not the answer.</p>
+          </div>
+          <div class="nugget">
+            <h3>A stale doc baseline, fixed</h3>
+            <p>The marker-coverage claim was measured against the original branch point. Once R26 merged upstream commits in, that diff also lists files <em>upstream</em> changed — it reported 78 files, not 32. Rebased on the merged upstream head.</p>
+          </div>
+          <div class="nugget">
+            <h3>App build failed on someone else's edit</h3>
+            <p>A parallel session was live in the app's s3-camera-input worktree and fixed a <code>CameraCore.kt</code> error mid-run. If an app build fails in a module with no RootEncoder dependency, check <code>git status</code> before blaming the merge.</p>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details open>
+      <summary><span class="htext"><span class="sec-eyebrow">Still open</span><h2>Next</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <ul class="check">
+          <li><strong>Bench pass on the PDT.</strong> R24's checklist: R23 bounded open, R25 named-camera fps, R26 buffer pool, R27 send-job restart. Andy's hands — launch by hand, never adb.</li>
+          <li><strong>No tag.</strong> <code>2.8.0-gpx2</code> stays deferred until the app's rebuild finishes. Pin stays at <code>2.8.0-gpx1</code>; the app builds from branch source meanwhile.</li>
+        </ul>
+      </div>
+    </details>
+
+    <details class="raw">
+      <summary><span class="htext"><span class="sec-eyebrow">For the record</span><h2>Full Record + AI Notes</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <p class="hint">Complete raw recap + Claude's scratch notes — the same canonical block the AI reads from the top of this file.</p>
+        <pre id="fullmd"></pre>
+      </div>
+    </details>
+  </div>
+  <footer><span>GPX Stream · Session Recap · 2026-08-04 15:36</span><span>Internal — RootEncoder fork</span></footer>
+  <script>document.getElementById('fullmd').textContent=document.getElementById('recap').textContent.trim();</script>
+</body>
+</html>
