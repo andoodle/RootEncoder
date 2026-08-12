@@ -68,7 +68,16 @@ legible without running it.
 - **Do not add GPX commits to `gpx-master`.** It is frozen so `gpxnative-ai` keeps a stable
   base. A fix that `gpxnative-ai` genuinely needs is a deliberate decision to unfreeze, made
   with the owner, not a routine commit.
-- **New GPX work goes on `gpx-2.8`**, tagged `2.8.0-gpx<N>`.
+- **New GPX work goes on `gpx-2.8`**, tagged `2.8.0-gpx<N>`. Each GPX change needs its own
+  reason and its own approval from the consumer side — "the fork is open anyway" is never one
+  (the gpxstream-app fork-edit rule).
+- **Authorized, not yet built — per-encoder re-prepare (gpxstream-app S8 gate, F2, Andy
+  2026-08-12).** A scoped re-prepare that rebuilds one video encoder while the other encoder
+  and the muxer keep running, stream side and record side each; honours the existing
+  invariants (the record/stream aspect-ratio equality check, the record parameter set,
+  B-frame suppression and the negotiated-format listener surviving a re-prepare). Ships as
+  `2.8.0-gpx2`. Design home: `gpxstream-app/docs/design/S8_recording_vod.md` (F2), build
+  placement in its implementation plan (WP9).
 - **Never reuse or move a published tag.** JitPack caches builds per tag; a moved tag serves
   stale or mismatched artifacts.
 - **The next upstream sync** fast-forwards `master`, then branches or rebases the GPX line off
