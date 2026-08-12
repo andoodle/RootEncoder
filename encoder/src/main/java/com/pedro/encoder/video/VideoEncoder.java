@@ -65,6 +65,10 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   private int rotation = 90;
   private int iFrameInterval = 2;
   private long firstTimestamp = 0;
+  // GPX diagnostic seam: unre-based Surface/EGL timestamp for the output currently being
+  // delivered. Surface timestamps share Android's elapsed-realtime clock domain. -1 for buffer
+  // inputs, whose codec PTS is not guaranteed to be an absolute elapsed-realtime timestamp.
+  private volatile long lastSourceElapsedRealtimeUs = -1;
   //for disable video
   private final FpsLimiter fpsLimiter = new FpsLimiter();
   private FormatVideoEncoder formatVideoEncoder = FormatVideoEncoder.YUV420Dynamical;
@@ -669,6 +673,8 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
         Log.e(TAG, "manual av1 extraction failed");
       }
     }
+    lastSourceElapsedRealtimeUs = formatVideoEncoder == FormatVideoEncoder.SURFACE
+        ? bufferInfo.presentationTimeUs : -1;
     if (timestampMode == TimestampMode.CLOCK) {
       if (formatVideoEncoder != FormatVideoEncoder.SURFACE) {
         // Buffer mode: synthesize PTS from wall clock.
@@ -685,6 +691,14 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
       bufferInfo.presentationTimeUs -= firstTimestamp;
     }
     return checkValidTimeStamp(bufferInfo);
+  }
+
+  /**
+   * Unre-based Surface/EGL timestamp for the output most recently passed to GetVideoData.
+   * Returns -1 for non-Surface input.
+   */
+  public long getLastSourceElapsedRealtimeUs() {
+    return lastSourceElapsedRealtimeUs;
   }
 
   @Override
