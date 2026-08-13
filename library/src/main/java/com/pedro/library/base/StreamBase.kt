@@ -77,6 +77,9 @@ import kotlin.math.max
  * - **R18** — the negotiated-format seam ([setStreamVideoFormatListener], [getLastStreamVideoFormat]).
  * - **R19** — the record codec applied coherently on a prepared encoder ([applyVideoRecCodec],
  *   [recordCodecNeedsReprepare], and the `recordCodecPrepared` claim it maintains).
+ * - **R28** — the scoped per-encoder re-prepare ([applyVideoStreamConfig],
+ *   [applyVideoRecConfig]): rebuild one video encoder while the other encoder and the muxer
+ *   keep running (gpxstream-app S8 gate, F2).
  * - **GPX patch** — a `sourcesRunning` flag making `startSources`/`stopSources` idempotent and
  *   transactional, and an `isOnPreview` ordering fix in `startPreview`.
  *
@@ -131,7 +134,8 @@ abstract class StreamBase(
    * not known to be prepared with anything.
    *
    * A fact, never an intention. Only a site that applies a codec together with a profile and level
-   * derived for that codec may set it: [prepareVideo]'s record branch and [applyVideoRecCodec].
+   * derived for that codec may set it: [prepareVideo]'s record branch, [applyVideoRecCodec] and
+   * [applyVideoRecConfig] (R28).
    * Every other site that prepares the record encoder is a replay ([prepareEncoders],
    * [resetVideoEncoder]) that reuses whatever codec and stored pair are on the encoder, so it can
    * move the codec without moving the pair, and may only leave this alone or clear it. A replay that
@@ -1051,6 +1055,169 @@ abstract class StreamBase(
       recordCodecPrepared = codec
       // Label last, so it is only advanced once the bitstream behind it exists.
       recordController.setVideoCodec(codec)
+      return true
+    } catch (t: Throwable) {
+      recordCodecPrepared = null
+      throw t
+    }
+  }
+
+  /**
+   * GPX R28 — re-prepare the STREAM video encoder with new parameters while the record encoder,
+   * the sources and the muxer keep running (gpxstream-app S8 gate, F2; R-STR-14's stream-encoder
+   * tier).
+   *
+   * [prepareVideo] refuses unless stream, record and preview are all stopped, so a stream-side
+   * change while a recording rolls would force the recording down. This is the scoped
+   * alternative: only the stream encoder is detached, re-prepared and (if the sources are up)
+   * restarted; the record encoder, its surface and the muxer are never touched.
+   *
+   * Preconditions, each thrown as the caller's error:
+   * - the stream must be stopped ([isStreaming] false) — the caller's quiesce; re-preparing the
+   *   encoder under a live sender would swap the bitstream mid-connection.
+   * - a dedicated record encoder must exist ([prepareVideo] with record dimensions): with a
+   *   shared encoder the recording taps this encoder, so there is nothing scoped to rebuild —
+   *   use the full [prepareVideo] path there.
+   * - [width]x[height] must keep the record encoder's aspect ratio — the same invariant
+   *   [prepareVideo] establishes between the two encoders.
+   *
+   * Fps and rotation are deliberately not parameters: both are shared-engine facts (the GL
+   * plane and both encoders read them), so a change to either is a full [prepareVideo] rebuild.
+   * The shared video source is not re-inited — it keeps capturing at the size [prepareVideo]
+   * chose, so a [width]x[height] larger than that capture is upscaled by the GL plane until the
+   * next full rebuild.
+   *
+   * [codec] non-null moves the stream codec: it is applied to the encoder immediately before
+   * the prepare that realises it and to the protocol layer ([setVideoCodecImp]) only after that
+   * prepare succeeded — the [setVideoCodec] ordering, without its [resetVideoEncoder] call that
+   * would also bounce the record encoder mid-recording.
+   *
+   * @return true when the encoder is prepared (and restarted, surface re-attached, when the
+   * sources are up). False means nothing is claimed: the encoder is stopped and the caller must
+   * go through [prepareVideo] before the next start.
+   */
+  @JvmOverloads
+  fun applyVideoStreamConfig(
+    width: Int, height: Int, bitrate: Int,
+    iFrameInterval: Int = 2,
+    profile: Int = -1, level: Int = -1,
+    codec: VideoCodec? = null,
+  ): Boolean {
+    if (isStreaming) {
+      throw IllegalStateException("stopStream before changing the stream encoder")
+    }
+    if (!differentRecordResolution) {
+      throw IllegalStateException("no dedicated record encoder; use prepareVideo")
+    }
+    val recordWidth = videoEncoderRecord.width
+    val recordHeight = videoEncoderRecord.height
+    if (width.toDouble() / height.toDouble() != recordWidth.toDouble() / recordHeight.toDouble()) {
+      throw IllegalArgumentException("The aspect ratio of record and stream resolution must be the same")
+    }
+
+    val wasRunning = videoEncoder.isRunning
+    // Start and attach below exactly when no start path will: while the sources are up (a live
+    // recording holds them), nothing else restarts this encoder — the applyVideoRecCodec rule,
+    // mirrored to the stream side.
+    val mustStartHere = wasRunning || sourcesRunning
+    glInterface.removeMediaCodecSurface()
+    // GPX R9's discipline: stop(false) preserves the timestamp baseline, so the record encoder's
+    // clock and this one stay on the same epoch when both feed one session later.
+    videoEncoder.stop(false)
+    // A new prepare means a new negotiated format is coming; the old one describes the previous
+    // configuration.
+    lastStreamVideoFormat = null
+    if (codec != null) videoEncoder.type = codec
+    val rotation = videoEncoder.rotation
+    val prepared = videoEncoder.prepareVideoEncoder(width, height, videoEncoder.fps, bitrate,
+      rotation, iFrameInterval, FormatVideoEncoder.SURFACE, profile, level)
+    if (!prepared) return false
+    if (rotation == 90 || rotation == 270) glInterface.setEncoderSize(height, width)
+    else glInterface.setEncoderSize(width, height)
+    // The protocol layer moves only once the bitstream behind it exists — setVideoCodec's
+    // label-last ordering.
+    if (codec != null) setVideoCodecImp(codec)
+    if (mustStartHere) {
+      videoEncoder.restart()
+      glInterface.addMediaCodecSurface(videoEncoder.inputSurface)
+    }
+    return true
+  }
+
+  /**
+   * GPX R28 — re-prepare the RECORD video encoder with new parameters while the stream encoder
+   * and the sources keep running (gpxstream-app S8 gate, F2; the record-encoder tier).
+   *
+   * The full-parameter generalization of [applyVideoRecCodec]: resolution, bitrate, VBR, codec
+   * and the codec-namespaced profile/level move together under the same claim-and-label
+   * discipline — either the encoder, [recordCodecPrepared] and the muxer's label all describe
+   * the new configuration on true, or nothing is claimed. The recording itself must be stopped
+   * first (the caller stop-confirms; a mid-file parameter change is not a muxable event), but
+   * the stream, the sources and the stream encoder are never touched.
+   *
+   * Preconditions: record stopped (thrown), a dedicated record encoder (false, the
+   * [applyVideoRecCodec] rule — with a shared encoder the record parameters are not this
+   * method's to set), and the stream encoder's aspect ratio kept (thrown). The shared video
+   * source is not re-inited; see [applyVideoStreamConfig] on capture-size upscaling.
+   *
+   * @param recordProfile profile derived for the codec the encoder will hold ([recordCodec], or
+   * the current one when null) — the pair travels with its codec, never across namespaces.
+   * @return true when the encoder is prepared (and restarted, surface re-attached, when the
+   * sources are up). False means nothing is claimed and recording must not start until a
+   * successful prepare.
+   */
+  @JvmOverloads
+  fun applyVideoRecConfig(
+    recordWidth: Int, recordHeight: Int, recordBitrate: Int,
+    forceRecordVbr: Boolean,
+    iFrameInterval: Int = 2,
+    recordProfile: Int = -1, recordLevel: Int = -1,
+    recordCodec: VideoCodec? = null,
+  ): Boolean {
+    if (isRecording) {
+      throw IllegalStateException("stopRecord before changing the record encoder")
+    }
+    if (!differentRecordResolution) return false
+    val streamWidth = videoEncoder.width
+    val streamHeight = videoEncoder.height
+    if (recordWidth.toDouble() / recordHeight.toDouble() != streamWidth.toDouble() / streamHeight.toDouble()) {
+      throw IllegalArgumentException("The aspect ratio of record and stream resolution must be the same")
+    }
+
+    val wasRunning = videoEncoderRecord.isRunning
+    // The applyVideoRecCodec rule: while streaming, startRecord's startSources() is a no-op, so
+    // this is the only site that can restart and re-attach the record encoder.
+    val mustStartHere = wasRunning || isStreaming
+    glInterface.removeMediaCodecRecordSurface()
+    // GPX R9 — stop(false) preserves the timestamp baseline across the re-prepare.
+    videoEncoderRecord.stop(false)
+    // From here the encoder no longer matches recordCodecPrepared; every exit must leave the
+    // claim correct (the applyVideoRecCodec reasoning — clearing is the safe direction).
+    try {
+      videoEncoderRecord.setTryForceVBRBitrateMode(forceRecordVbr)
+      if (recordCodec != null) videoEncoderRecord.type = recordCodec
+      val rotation = videoEncoderRecord.rotation
+      val prepared = videoEncoderRecord.prepareVideoEncoder(recordWidth, recordHeight,
+        videoEncoderRecord.fps, recordBitrate, rotation, iFrameInterval,
+        FormatVideoEncoder.SURFACE, recordProfile, recordLevel)
+      if (!prepared) {
+        recordCodecPrepared = null
+        return false
+      }
+      // A new prepare means a new negotiated format is coming; the old one describes the
+      // previous configuration and would otherwise be replayed into a fresh record controller.
+      lastVideoFormat = null
+      if (rotation == 90 || rotation == 270) glInterface.setEncoderRecordSize(recordHeight, recordWidth)
+      else glInterface.setEncoderRecordSize(recordWidth, recordHeight)
+      if (mustStartHere) {
+        videoEncoderRecord.restart()
+        glInterface.addMediaCodecRecordSurface(videoEncoderRecord.inputSurface)
+      }
+      // This site applies the codec together with a profile and level derived for it, so it may
+      // set the claim (see recordCodecPrepared's KDoc).
+      recordCodecPrepared = recordEncoderCodec()
+      // Label last, so the muxer only ever names a codec whose bitstream already exists.
+      if (recordCodec != null) recordController.setVideoCodec(recordCodec)
       return true
     } catch (t: Throwable) {
       recordCodecPrepared = null

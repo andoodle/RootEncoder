@@ -71,13 +71,16 @@ legible without running it.
 - **New GPX work goes on `gpx-2.8`**, tagged `2.8.0-gpx<N>`. Each GPX change needs its own
   reason and its own approval from the consumer side — "the fork is open anyway" is never one
   (the gpxstream-app fork-edit rule).
-- **Authorized, not yet built — per-encoder re-prepare (gpxstream-app S8 gate, F2, Andy
-  2026-08-12).** A scoped re-prepare that rebuilds one video encoder while the other encoder
-  and the muxer keep running, stream side and record side each; honours the existing
-  invariants (the record/stream aspect-ratio equality check, the record parameter set,
-  B-frame suppression and the negotiated-format listener surviving a re-prepare). Ships as
-  `2.8.0-gpx2`. Design home: `gpxstream-app/docs/design/S8_recording_vod.md` (F2), build
-  placement in its implementation plan (WP9).
+- **Built as R28 — per-encoder re-prepare (authorized at the gpxstream-app S8 gate, F2, Andy
+  2026-08-12; ships as `2.8.0-gpx2`).** `StreamBase.applyVideoStreamConfig` and
+  `StreamBase.applyVideoRecConfig`: a scoped re-prepare that rebuilds one video encoder while
+  the other encoder and the muxer keep running, stream side and record side each; honours the
+  existing invariants (the record/stream aspect-ratio equality check, the record parameter
+  set and its `recordCodecPrepared` claim discipline, B-frame suppression and the
+  negotiated-format listener surviving a re-prepare). Device proof of the concurrent-encoder
+  path is the consumer's bench gate (R-STR-14's named risk) — the app runs its full-quiesce
+  fallback until that passes. Design home: `gpxstream-app/docs/design/S8_recording_vod.md`
+  (F2), build placement in its implementation plan (WP9).
 - **Never reuse or move a published tag.** JitPack caches builds per tag; a moved tag serves
   stale or mismatched artifacts.
 - **The next upstream sync** fast-forwards `master`, then branches or rebases the GPX line off

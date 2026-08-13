@@ -123,6 +123,17 @@ The marker convention is in `.claude/gpx-branch-policy.md`.
       budget a `restart()` must not quietly clear the flag. The line was never a GPX change — R9
       only added the `forceContinuousTs` guard on the `tsBuffer` reset immediately above it — so
       nothing of ours is lost. The `VideoEncoder` half merged with no conflict at all.
+- [x] R28 — Per-encoder re-prepare (`gpxstream-app` S8 gate, F2, Andy 2026-08-12; ships as
+      `2.8.0-gpx2`). `prepareVideo` refuses unless stream, record and preview are all stopped, so
+      a stream-side parameter change while a recording rolls would force the recording down —
+      which the consumer's R-STR-12 forbids. Adds two scoped re-prepares to `StreamBase`, each
+      rebuilding one video encoder while the other encoder, the sources and the muxer keep
+      running: `applyVideoStreamConfig` (stream stopped, recording may roll) and
+      `applyVideoRecConfig` (record stopped, stream may roll — the full-parameter generalization
+      of R19's `applyVideoRecCodec`, same claim-and-label discipline). Fps and rotation stay
+      full-rebuild-only (shared-engine facts); the shared video source is not re-inited, so a
+      size above the capture upscales until the next full rebuild. The concurrent-hardware-
+      encoder risk on the restart path is the consumer's bench gate.
 
 ### Per-item outcome under the take-theirs ruling (Andy, 2026-08-04)
 
