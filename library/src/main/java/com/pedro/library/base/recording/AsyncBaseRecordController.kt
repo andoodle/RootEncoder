@@ -33,6 +33,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.FileDescriptor
 import java.nio.ByteBuffer
 import kotlin.concurrent.Volatile
@@ -46,6 +47,14 @@ abstract class AsyncBaseRecordController : RecordController {
   companion object {
     const val TAG: String = "AsyncRecordController"
     private const val CAPACITY = 500
+
+    // GPX R29 — how long [stopRecord] waits for the muxer coroutine to drain before abandoning it.
+    // The join can otherwise never return: the muxer may be parked in a non-cancellable disk write
+    // (a wedged or full card), which cancel() cannot interrupt, so an unbounded runBlocking join
+    // parks the calling thread forever. StreamBase.release() calls stopRecord() from the engine
+    // thread, so that permanently-parked thread would take the whole stream down with it — the
+    // exact R-STR-12 outcome the record lane exists to prevent.
+    private const val STOP_JOIN_TIMEOUT_MS = 3_000L
   }
 
   @Volatile
@@ -242,7 +251,12 @@ abstract class AsyncBaseRecordController : RecordController {
     muxerChannel?.close()
     muxerChannel = null
     muxerJob?.cancel()
-    runBlocking { muxerJob?.join() }
+    // GPX R29 — bounded join. The job is already cancelled; if it does not unwind within the
+    // timeout it is parked in a non-cancellable write and joining longer only parks this thread
+    // too. On timeout the job is abandoned (its scope is Dispatchers.IO, so a straggler frees
+    // itself when the stuck write eventually errors or the process ends); the stalled file is lost
+    // regardless, and the caller — the engine thread, on release() — survives.
+    runBlocking { withTimeoutOrNull(STOP_JOIN_TIMEOUT_MS) { muxerJob?.join() } }
     bufferPool.clear()
     recordStatus = RecordController.Status.STOPPED
     clearTimestamp()

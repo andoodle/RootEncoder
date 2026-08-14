@@ -765,6 +765,22 @@ abstract class StreamBase(
   private var sourcesRunning = false
 
   /**
+   * GPX R30 — serializes the shared source/encoder lifecycle mutations across the two threads the
+   * gpxstream-app tier flip drives them from: the engine thread ([startStream]/[stopStream],
+   * [applyVideoStreamConfig]/[applyVideoRecConfig], [prepareEncoders], release) and the record lane
+   * ([startRecord]/[stopRecord]). Those methods are plain volatile check-then-act, written for one
+   * driving thread; concurrent calls could double-start an encoder ([startSources] racing itself →
+   * `videoEncoder.start()` twice → IllegalStateException) or reconfigure a MediaCodec under a
+   * starting stream (a native crash the app's try/catch cannot catch). This monitor guards the
+   * source/encoder mutations only. It is deliberately NOT held across the muxer join in
+   * [stopRecord] (`recordController.stopRecord()`): a lock held across that join would let a record
+   * lane parked in a non-cancellable write (the F1/R29 case) block the engine thread that wants the
+   * lock — so only the source/encoder sub-methods [stopRecord] calls after the join take it, never
+   * the join itself. Reentrant (a plain object monitor), so [startStream]→[startSources] nests fine.
+   */
+  private val lifecycleLock = Any()
+
+  /**
    * Idempotent and transactional.
    *
    * Idempotent so a caller does not have to infer from a consumer flag whether the sources are
@@ -775,7 +791,9 @@ abstract class StreamBase(
    * [sourcesRunning] is set before the body so the cleanup path can run, and every line of
    * [stopSourcesImp] is individually safe against a component that never started.
    */
-  private fun startSources() {
+  // GPX R30 — synchronized: the shared source/encoder bring-up must not interleave with a
+  // concurrent bring-up, teardown or re-prepare on the other thread.
+  private fun startSources() = synchronized(lifecycleLock) {
     if (sourcesRunning) return
     sourcesRunning = true
     try {
@@ -802,7 +820,8 @@ abstract class StreamBase(
     }
   }
 
-  private fun stopSources() {
+  // GPX R30 — synchronized for the same reason as startSources.
+  private fun stopSources() = synchronized(lifecycleLock) {
     if (!sourcesRunning) return
     sourcesRunning = false
     stopSourcesImp()
@@ -812,7 +831,9 @@ abstract class StreamBase(
    * The teardown without the [sourcesRunning] guard. [release] calls this so a release on a
    * never-started stream still runs every line.
    */
-  private fun stopSourcesImp() {
+  // GPX R30 — synchronized: this is the teardown half of the shared source/encoder lifecycle, and
+  // release() reaches it directly (outside stopSources). Reentrant from stopSources/startSources.
+  private fun stopSourcesImp() = synchronized(lifecycleLock) {
     if (!isOnPreview) videoSource.stop()
     audioSource.stop()
     glInterface.removeMediaCodecSurface()
@@ -869,7 +890,9 @@ abstract class StreamBase(
    */
   fun resetAudioEncoder(): Boolean = audioEncoder.reset()
 
-  private fun prepareEncoders(): Boolean {
+  // GPX R30 — synchronized: re-prepares both encoders, so it must not interleave with a source
+  // bring-up/teardown or a per-encoder re-prepare on the other thread.
+  private fun prepareEncoders(): Boolean = synchronized(lifecycleLock) {
     if (differentRecordResolution) {
       val result = videoEncoderRecord.prepareVideoEncoder()
       // A replay: it re-sends the stored profile and level while reading the current codec, so if
@@ -1102,7 +1125,9 @@ abstract class StreamBase(
     iFrameInterval: Int = 2,
     profile: Int = -1, level: Int = -1,
     codec: VideoCodec? = null,
-  ): Boolean {
+    // GPX R30 — synchronized: re-prepares the stream encoder, must not race a source bring-up on
+    // the record lane. Never wraps a muxer join (this touches no record controller).
+  ): Boolean = synchronized(lifecycleLock) {
     if (isStreaming) {
       throw IllegalStateException("stopStream before changing the stream encoder")
     }
@@ -1173,7 +1198,10 @@ abstract class StreamBase(
     iFrameInterval: Int = 2,
     recordProfile: Int = -1, recordLevel: Int = -1,
     recordCodec: VideoCodec? = null,
-  ): Boolean {
+    // GPX R30 — synchronized: re-prepares the record encoder, must not race a source bring-up or a
+    // stream re-prepare on the engine thread. The caller stop-confirms the recording first, so the
+    // muxer join has already happened off-lock before this runs.
+  ): Boolean = synchronized(lifecycleLock) {
     if (isRecording) {
       throw IllegalStateException("stopRecord before changing the record encoder")
     }

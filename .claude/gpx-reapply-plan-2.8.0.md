@@ -134,7 +134,31 @@ The marker convention is in `.claude/gpx-branch-policy.md`.
       full-rebuild-only (shared-engine facts); the shared video source is not re-inited, so a
       size above the capture upscales until the next full rebuild. The concurrent-hardware-
       encoder risk on the restart path is the consumer's bench gate.
-
+- [x] R29 — Bounded muxer join in `AsyncBaseRecordController.stopRecord` (`gpxstream-app` S8
+      post-merge review, F1/CRITICAL; ships in the `2.8.0-gpx3` line). The `runBlocking { muxerJob?.join() }`
+      never returns if the muxer coroutine is parked in a non-cancellable disk write (a wedged or
+      full card) — `cancel()` cannot interrupt it. `StreamBase.release()` calls `stopRecord()` from
+      the engine thread, so a permanently-parked join takes the whole stream down with the recording,
+      the exact R-STR-12 outcome the consumer's record lane exists to prevent. Bounds the join with
+      `withTimeoutOrNull(STOP_JOIN_TIMEOUT_MS = 3_000L)`; on timeout the already-cancelled job is
+      abandoned (a straggler on `Dispatchers.IO` frees itself when the stuck write errors), the
+      stalled file is lost regardless, and the caller survives. Self-contained; no other file touched.
+- [x] R30 — Lifecycle mutual exclusion in `StreamBase` (`gpxstream-app` S8 post-merge review,
+      F2/HIGH; ships in the `2.8.0-gpx3` line). With the consumer's tier flip, two threads drive the
+      shared source/encoder lifecycle — the engine thread (`startStream`/`stopStream`,
+      `applyVideoStreamConfig`/`applyVideoRecConfig`, `prepareEncoders`, `release`) and the record
+      lane (`startRecord`/`stopRecord`). Those methods are plain volatile check-then-act built for
+      one driving thread, so a concurrent pair could double-start an encoder (`startSources` racing
+      itself → `videoEncoder.start()` twice → IllegalStateException) or reconfigure a MediaCodec
+      under a starting stream (an uncatchable native crash). Adds one reentrant monitor
+      (`lifecycleLock`) guarding the source/encoder mutations: `startSources`, `stopSources`,
+      `stopSourcesImp`, `prepareEncoders`, `applyVideoStreamConfig`, `applyVideoRecConfig`.
+      **Deliberately NOT held across the muxer join** (`recordController.stopRecord()` in
+      `stopRecord`/`release`): a lock held across that join would let a record lane parked in a
+      non-cancellable write (R29's case) block the engine thread that wants the lock — so only the
+      source/encoder sub-methods those paths call *after* the join take it, never the join itself.
+      A single reentrant monitor has no lock-ordering cycle and is never held across the join, so it
+      cannot deadlock. The concurrent-hardware behaviour is the consumer's bench gate.
 ### Per-item outcome under the take-theirs ruling (Andy, 2026-08-04)
 
 The ruling: where upstream has improved the library so one of our patches is no longer necessary,
