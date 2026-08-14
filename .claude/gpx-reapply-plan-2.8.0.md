@@ -159,6 +159,15 @@ The marker convention is in `.claude/gpx-branch-policy.md`.
       source/encoder sub-methods those paths call *after* the join take it, never the join itself.
       A single reentrant monitor has no lock-ordering cycle and is never held across the join, so it
       cannot deadlock. The concurrent-hardware behaviour is the consumer's bench gate.
+      **Adversarial-review follow-up (F2 lens):** locking only the six sub-methods left the
+      `stopRecord`/`stopStream` *tails* racing — `if (!isStreaming) { stopSources(); prepareEncoders() }`
+      is check-then-act, so the engine thread's `startStream` could set `isStreaming` and start the
+      sources between the record lane's read and its `stopSources()`, tearing a live stream's sources
+      down. Fixed: each tail is now one `synchronized(lifecycleLock)` block (it runs *after* the join,
+      so it still wraps no join), and `isStreaming` is `@Volatile` (read cross-lane). Known residual
+      (review MED, generic-fork surface unused here): on a bounded-join timeout `stopRecordImp()`
+      still runs against possibly-wedged storage — survivable for this app (MPEG-TS close throws into
+      a caught path, RecordCapture installs a fresh controller per start), tracked on #15.
 ### Per-item outcome under the take-theirs ruling (Andy, 2026-08-04)
 
 The ruling: where upstream has improved the library so one of our patches is no longer necessary,

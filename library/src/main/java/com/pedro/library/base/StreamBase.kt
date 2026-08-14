@@ -173,6 +173,9 @@ abstract class StreamBase(
     }
   }
 
+  // GPX R30 — volatile: read cross-lane by the record lane's stopRecord tail to decide whether to
+  // tear the shared sources down, so the read must see the engine thread's latest write.
+  @Volatile
   var isStreaming = false
     private set
   var isOnPreview = false
@@ -400,11 +403,18 @@ abstract class StreamBase(
   fun stopStream(): Boolean {
     isStreaming = false
     stopStreamImp()
-    if (!isRecording) {
-      stopSources()
-      return prepareEncoders()
+    // GPX R30 — the "is anyone else using the sources?" check and the teardown it gates must be one
+    // critical section: otherwise the record lane's startRecord could set isRecording and start the
+    // sources between this `!isRecording` read and stopSources(), and this would then tear a live
+    // recording's sources down. Holds no muxer join (stopStreamImp is transport only).
+    return synchronized(lifecycleLock) {
+      if (!isRecording) {
+        stopSources()
+        prepareEncoders()
+      } else {
+        true
+      }
     }
-    return true
   }
 
   /**
@@ -447,12 +457,20 @@ abstract class StreamBase(
    * Must be called after prepareVideo and prepareAudio.
    */
   fun stopRecord(): Boolean {
+    // The muxer join happens inside recordController.stopRecord() — deliberately OUTSIDE the lock
+    // (GPX R29/R30): a lock held across a parked join would block the engine thread.
     recordController.stopRecord()
-    if (!isStreaming) {
-      stopSources()
-      return prepareEncoders()
+    // GPX R30 — same critical-section reasoning as stopStream, mirrored: the engine thread's
+    // startStream could set isStreaming and start the sources between this `!isStreaming` read and
+    // stopSources(), tearing a live stream's sources down. Runs after the join, so it wraps no join.
+    return synchronized(lifecycleLock) {
+      if (!isStreaming) {
+        stopSources()
+        prepareEncoders()
+      } else {
+        true
+      }
     }
-    return true
   }
 
   /**
