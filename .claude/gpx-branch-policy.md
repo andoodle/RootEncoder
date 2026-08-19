@@ -116,4 +116,5 @@ unbroken ordinary paths, not the races. `gpxstream-app`'s pin is `2.8.0-gpx3`.
 **Branch head, ahead of `2.8.0-gpx3` and untagged — build-verified only.** It carries R31, the
 merge of upstream `pedro/master` @ `300d99fe1` (surface-PTS rebase onto the shared start, the
 GL timestamp rework, a timestamp-based fps limiter — all on the live video path, so the next
-consumer pin move wants a bench watch for A/V sync and frame pacing).
+consumer pin move wants a bench watch for A/V sync and frame pacing), and R32, the encoded-frame
+timing seam ported from `teaky-frame-timing` (inert until a listener is set).

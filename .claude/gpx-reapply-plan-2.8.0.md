@@ -249,6 +249,17 @@ tags, same counts — so no patch was silently dropped by an auto-resolved hunk.
       Marker check: the inventory differs from pre-merge by exactly the R1 marker (deliberately
       removed with its patch) and R11's marker comment extended to note the new callback body —
       142 marker lines against 143, nothing silently dropped.
+- [x] R32 — Encoded-frame timing seam, ported from Anton's `teaky-frame-timing` branch
+      (`52926292d`, authored on the frozen 2.7.5 line; the branch stays put, only the change
+      moves — authorized by Andy, 2026-08-19). Purely additive diagnostics:
+      `StreamBase.setStreamVideoFrameTimingListener` observes each non-config encoded stream-video
+      frame with its encoded PTS, its raw Surface/EGL timestamp, and the delivery instant
+      (`StreamVideoFrameTiming`), so camera-to-encoded pipeline latency is measurable without wall
+      clock. A no-op unless a listener is set; the listener call is exception-isolated so a
+      diagnostic cannot break encoding. The raw-timestamp capture in `VideoEncoder.checkBuffer`
+      sits deliberately *above* R31's `rebaseSurfacePts`, preserving the "unre-based" meaning now
+      that upstream rewrites the PTS in place. Cherry-picked clean; markers normalized to
+      `GPX R32`.
 - [x] R24 — Tag `2.8.0-gpx2` and bump the pin in `gpxstream-app`. **Done 2026-08-12**: the tag
       was cut at `a88f8d58f` (R28 included) with the consumer's pin move (gpxstream-app #46) for
       the S8 tier flip, superseding the 2026-08-03 hold; `2.8.0-gpx3` followed 2026-08-13 with

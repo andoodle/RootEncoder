@@ -49,6 +49,8 @@ import com.pedro.library.base.recording.RecordController
 import com.pedro.library.util.AndroidMuxerRecordController
 import com.pedro.library.util.FpsListener
 import com.pedro.library.util.PreviewCallback
+import com.pedro.library.util.StreamVideoFrameTiming
+import com.pedro.library.util.StreamVideoFrameTimingListener
 import com.pedro.library.util.streamclient.StreamBaseClient
 import com.pedro.library.view.GlStreamInterface
 import com.pedro.library.view.preview.MultiPreviewConfig
@@ -127,6 +129,10 @@ abstract class StreamBase(
   /** GPX R18 — see [setStreamVideoFormatListener]. Volatile as for [lastStreamVideoFormat]. */
   @Volatile
   private var streamVideoFormatListener: ((MediaFormat) -> Unit)? = null
+
+  /** GPX R32 — invoked once for every non-config stream-encoder output frame. */
+  @Volatile
+  private var streamVideoFrameTimingListener: StreamVideoFrameTimingListener? = null
 
   /**
    * GPX R19 — the codec the record encoder was last successfully prepared with, as observed here.
@@ -665,6 +671,18 @@ abstract class StreamBase(
   }
 
   /**
+   * GPX R32 — observe each encoded STREAM video frame with both its encoded PTS and, for Surface
+   * input, its original Android elapsed-realtime timestamp. The listener runs on the MediaCodec
+   * callback thread, must be non-blocking, and is isolated so diagnostics cannot break encoding.
+   *
+   * Pass null to clear. This observes the stream encoder even when a separate record encoder is in
+   * use; it never modifies buffers, timestamps, recording, or network delivery.
+   */
+  fun setStreamVideoFrameTimingListener(listener: StreamVideoFrameTimingListener?) {
+    streamVideoFrameTimingListener = listener
+  }
+
+  /**
    * Change stream orientation depend of activity orientation.
    * This method affect to preview and stream.
    * Must be called after prepareVideo.
@@ -945,6 +963,22 @@ abstract class StreamBase(
 
     override fun getVideoData(videoBuffer: ByteBuffer, info: MediaCodec.BufferInfo) {
       fpsListener.calculateFps()
+      // GPX R32 — frame-timing observation; isolated so a listener fault cannot break encoding.
+      if (info.size > 0 && info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0) {
+        try {
+          val sourceUs = videoEncoder.lastSourceElapsedRealtimeUs
+          streamVideoFrameTimingListener?.onFrame(
+            StreamVideoFrameTiming(
+              presentationTimeUs = info.presentationTimeUs,
+              sourceElapsedRealtimeNs = sourceUs.takeIf { it >= 0 }?.times(1_000L),
+              encodedElapsedRealtimeNs = android.os.SystemClock.elapsedRealtimeNanos(),
+              flags = info.flags,
+            )
+          )
+        } catch (e: Exception) {
+          Log.e("StreamBase", "streamVideoFrameTimingListener threw; ignoring", e)
+        }
+      }
       if (!differentRecordResolution) recordController.recordVideo(videoBuffer, info)
       getVideoDataImp(videoBuffer, info)
     }
