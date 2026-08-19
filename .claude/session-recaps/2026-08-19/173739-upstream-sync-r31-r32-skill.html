@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<!-- CANONICAL CONTENT FOR AI: the complete recap (+ AI notes) is the raw-markdown
+     block below, kept FIRST on purpose. Read just this block (Read with a line limit)
+     to get the whole recap cheaply. Source of truth; the styled body is a human VIEW. -->
+<script type="text/markdown" id="recap">
+# Upstream sync R31 + R32 port + upstream-sync skill — 2026-08-19
+
+**Outcome:** gpx-2.8 merged upstream pedro/master @ `300d99fe1` (R31, 23 commits, first-ever
+patch retirement: R1), Anton's `teaky-frame-timing` seam ported as R32, the repeatable sync
+procedure captured as the repo skill `.claude/skills/upstream-sync/SKILL.md`. `master` mirror
+fast-forwarded and pushed. `gradlew assembleDebug test` green after each commit. Branch head
+`4cfc10622` pushed; **untagged** — tag + `gpxstream-app` pin move is a deliberate open item
+pending a bench watch.
+
+## The two assessment questions (asked before merging, per Andy's standing instruction)
+
+- **Worth updating? Yes.** The headline is upstream `52b7d145f`: in SURFACE mode
+  `VideoEncoder.checkBuffer` rebased video PTS on the encoder's own first output while audio
+  rebases on the shared `presentTimeUs` origin — camera-open + GL warm-up became a constant
+  A/V offset, measured upstream at ~470 ms video-ahead. GL-surface video + mic audio is exactly
+  this fork's consumer configuration. Also taken: `GlTimestamp` jitter rework, timestamp-based
+  `FpsLimiter`, null-safe codec capability reads, SRT bodyless-control-packet parsing, the
+  rotated-resolution announce (inert here — landscape).
+- **Any patch superseded? Yes — R1 retires** (first retirement in fork history). Upstream's new
+  `isCBRModeSupported` contains R1's `encoderCapabilities == null → false` guard plus an
+  exception guard R1 lacked; `CodecUtil.java` is now byte-identical to upstream and left the
+  marker inventory. Everything else stays: R9 *composes* with the new `rebaseSurfacePts` (it
+  re-anchors only at `firstTimestamp == 0`, the reset `forceContinuousTs` deliberately
+  suppresses); R7/R8, R12/R29, R23/R25, R30 all orthogonal — per-item table in the re-apply plan.
+
+## What landed (fork repo, branch gpx-2.8)
+
+- `dab9e9377` **GPX R31** — the merge. 3 conflicts: CodecUtil (took upstream whole = R1
+  retirement), VideoEncoder (adjacency: R18 log helpers beside new `rebaseSurfacePts`, both
+  kept), GlStreamInterface (R16 wait kept ahead of `glTimestamp.reset()`; R11's shared
+  force-render callback kept its shape, body moved to upstream's timestamped form). Docs
+  brought current in the same commit.
+- `15dce8d49` **GPX R32** — Anton's `52926292d` (encoded-frame timing seam) cherry-picked from
+  `teaky-frame-timing` (a branch off frozen gpx-master; branch stays put, change moves).
+  Additive diagnostics: `setStreamVideoFrameTimingListener` → per-frame encoded PTS + raw
+  Surface timestamp + delivery instant; inert until a listener is set; exception-isolated.
+  Capture point sits deliberately ABOVE R31's rebase, preserving "unre-based" semantics.
+  Markers normalized `GPX diagnostic seam` → `GPX R32`.
+- `4cfc10622` **upstream-sync skill** — `.claude/skills/upstream-sync/SKILL.md` (force-added
+  past the `/.claude` ignore, same as the policy docs). Encodes: preflight, the two-question
+  gate, mirror FF, merge conflict rules, marker inventory/coverage verification, same-commit
+  doc obligations, build gate, and the "what a sync does NOT do" list (no tag/pin, no
+  ride-along GPX code, no 2.7.5-line changes).
+- `master` mirror: `02b8e9cce` → `300d99fe1`, pushed to andoodle.
+
+## Stale-doc corrections made in passing (verified against tags/pins, not memory)
+
+- Branch policy: tag table head `2.8.0-gpx1` → `2.8.0-gpx3`; synced-through line → `300d99fe1`;
+  verification-status section rewritten in place (gpx2 shipped 2026-08-12 w/ #46 pin move,
+  gpx3 2026-08-13, #78 bench pass 2026-08-14; R24's item-specific bench provocations have NO
+  recorded pass and stay open as watch items, honestly unticked).
+- Re-apply plan: R24 main box ticked (tag/pin done), stale "nothing run on a device" claim
+  fixed to point at the branch policy as the one home for verification status.
+- gpxstream-app CLAUDE.md fork bullet: disambiguated — the TAG is synced through `02b8e9cce`;
+  the BRANCH head is ahead (R31+R32, build-verified, untagged).
+
+## Open items
+
+- **Tag + pin move (Andy's call):** R31/R32 reach the app only via a new `2.8.0-gpx4` tag and
+  pin move, bench-gated. R31 touches the live video path everywhere — the bench watch is A/V
+  sync (should IMPROVE: lip-sync error should shrink) and frame pacing under the new fps
+  limiter. R32 is inert until the app sets a listener.
+- The app could then use R32's `setStreamVideoFrameTimingListener` for pipeline-latency
+  diagnostics (that was Anton's purpose on the 2.7.5 line — presumably for teaky frame timing
+  investigation).
+- R24's four item-specific bench provocations (R23/R25/R26/R27) remain standing watch items.
+
+## Gotchas for next time
+
+- `git show origin/gpx-2.8:.claude/file.md` breaks in Git Bash on Windows (path mangling of
+  the colon) — read via the worktree checkout instead.
+- `/.claude` is gitignored in the fork; tracked docs under it override the ignore, but NEW
+  files need `git add -f`.
+- The fork worktree lives at `D:/Development/RootEncoder/.claude/worktrees/gpx-2.8` and is the
+  standing gpx-2.8 checkout — merge there, never in the main checkout (which stays on
+  gpx-master).
+
+## AI notes (scratch — optional, written by Claude for future sessions)
+The upstream-sync skill now carries the whole procedure — invoke it instead of re-deriving
+from R27's commit message. When the tag+pin session happens: cut `2.8.0-gpx4` at whatever
+head is bench-approved, move the pin in `gradle/libs.versions.toml` + CLAUDE.md fork bullet
+(remove the "branch head is ahead" paragraph added today), and update the fork policy doc's
+head-tag table + verification section in the same motion.
+</script>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Upstream Sync R31+R32 — 2026-08-19 17:37</title>
+<style>
+  :root{--red-500:#EF3340;--red-700:#B3242B;--red-50:#FDECEC;--paper:#FAF8F5;--card:#FFFFFF;
+    --border:#DDD7CF;--border-subtle:#ECE7E0;--fg-1:#181512;--fg-2:#3D3833;--fg-3:#6B645C;
+    --ok:#12B76A;--attn:#F79009;--chip:#F1ECE5;
+    --font-display:"Barlow Condensed","Oswald","Segoe UI Semibold",system-ui,sans-serif;
+    --font-mono:"Roboto Mono",ui-monospace,"Cascadia Code",Consolas,Menlo,monospace;
+    --radius-md:4px;--radius-lg:8px;--shadow:0 1px 2px rgba(11,9,8,.06),0 4px 8px -2px rgba(11,9,8,.06);--maxw:880px;}
+  *{box-sizing:border-box;}html,body{margin:0;padding:0;}
+  body{background:var(--paper);color:var(--fg-2);font-family:var(--font-mono);font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 28px 72px;}
+  .topbar{max-width:var(--maxw);margin:0 auto;padding:26px 28px 0;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;}
+  .logo{display:inline-flex;align-items:center;gap:9px;}
+  .logo .flag{background:var(--red-500);color:#fff;font-family:var(--font-display);font-weight:800;font-size:17px;padding:3px 7px 2px;border-radius:2px;line-height:1;}
+  .logo .word{font-family:var(--font-display);font-weight:700;font-size:17px;letter-spacing:.14em;text-transform:uppercase;color:var(--fg-1);}
+  .doc-meta{font-size:11px;letter-spacing:.13em;text-transform:uppercase;color:var(--fg-3);text-align:right;}
+  .doc-meta .tag{color:var(--red-700);font-weight:700;}
+  .topdivide{max-width:var(--maxw);margin:16px auto 0;padding:0 28px;}.topdivide hr{border:0;border-top:2px solid var(--red-500);margin:0;}
+  .hero{padding:38px 0 4px;}
+  .eyebrow{font-size:11px;font-weight:700;letter-spacing:.26em;text-transform:uppercase;color:var(--red-700);margin:0 0 12px;}
+  h1{font-family:var(--font-display);font-weight:800;font-size:46px;line-height:1.03;text-transform:uppercase;color:var(--fg-1);margin:0 0 14px;}
+  .standfirst{font-size:16px;color:var(--fg-2);max-width:64ch;margin:0;}
+  .stats{display:flex;flex-wrap:wrap;gap:10px;margin-top:22px;}
+  .stat{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-md);padding:9px 15px;box-shadow:var(--shadow);}
+  .stat b{font-family:var(--font-display);font-weight:700;font-size:22px;color:var(--fg-1);display:block;line-height:1;margin-bottom:3px;}
+  .stat span{font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:var(--fg-3);}
+  details{padding-top:34px;border:0;}details+details{border-top:1px solid var(--border-subtle);}
+  summary{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;cursor:pointer;list-style:none;padding-top:6px;}
+  summary::-webkit-details-marker{display:none;}summary .htext{flex:1;}
+  summary .chev{font-family:var(--font-mono);font-weight:700;font-size:20px;line-height:1;color:var(--red-500);margin-top:16px;transition:transform .18s ease;user-select:none;}
+  details[open] summary .chev{transform:rotate(90deg);}summary:hover h2{color:var(--red-700);}
+  .count{font-family:var(--font-mono);font-size:12px;font-weight:700;color:var(--red-700);background:var(--red-50);border-radius:20px;padding:2px 9px;margin-left:10px;vertical-align:middle;}
+  .secbody{padding-top:14px;}
+  .sec-eyebrow{font-size:11px;font-weight:700;letter-spacing:.22em;text-transform:uppercase;color:var(--red-700);margin:0 0 8px;display:flex;align-items:center;gap:10px;}
+  .sec-eyebrow::before{content:"";width:18px;height:2px;background:var(--red-500);display:inline-block;}
+  h2{font-family:var(--font-display);font-weight:700;font-size:27px;line-height:1.1;text-transform:uppercase;color:var(--fg-1);margin:0;transition:color .12s;}
+  h3{font-family:var(--font-mono);font-weight:700;font-size:13.5px;color:var(--fg-1);margin:0 0 6px;}
+  p{margin:0 0 12px;}p:last-child{margin-bottom:0;}strong{color:var(--fg-1);font-weight:700;}
+  code{font-family:var(--font-mono);background:var(--chip);padding:.1em .4em;border-radius:3px;font-size:.86em;color:var(--fg-1);}
+  .cards{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:18px 20px;box-shadow:var(--shadow);}
+  .card .tag{display:inline-flex;align-items:center;gap:8px;font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px;}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block;}.dot.ok{background:var(--ok);}.dot.attn{background:var(--attn);}
+  .card p{font-size:13.5px;margin:0;}
+  .timeline{display:grid;}
+  .commit{display:grid;grid-template-columns:84px 1fr;gap:14px;align-items:baseline;padding:9px 0;border-bottom:1px solid var(--border-subtle);}
+  .commit:last-child{border-bottom:0;}
+  .commit .hash{background:var(--fg-1);color:#fff;font-size:11.5px;padding:3px 0;border-radius:3px;text-align:center;letter-spacing:.02em;}
+  .commit .msg{font-size:13.5px;color:var(--fg-2);}.commit .msg strong{color:var(--fg-1);}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  .nugget{background:var(--card);border:1px solid var(--border);border-left:3px solid var(--red-500);border-radius:var(--radius-md);padding:13px 16px;box-shadow:var(--shadow);}
+  .nugget h3{margin-bottom:5px;}.nugget p{font-size:12.5px;color:var(--fg-2);margin:0;}
+  ul.clean{list-style:none;margin:0;padding:0;display:grid;gap:8px;}
+  ul.clean li{position:relative;padding-left:24px;font-size:13.5px;color:var(--fg-2);}
+  ul.clean li::before{content:"";position:absolute;left:3px;top:8px;width:7px;height:7px;background:var(--red-500);border-radius:1px;transform:rotate(45deg);}
+  ul.clean li strong{color:var(--fg-1);}
+  .check{list-style:none;margin:0;padding:0;display:grid;gap:11px;}
+  .check li{position:relative;padding-left:28px;font-size:13.5px;color:var(--fg-2);}
+  .check li::before{content:"";position:absolute;left:0;top:2px;width:15px;height:15px;border:2px solid var(--attn);border-radius:3px;}
+  .check li strong{color:var(--fg-1);}
+  pre{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:13px 16px;overflow-x:auto;font-size:12px;line-height:1.5;color:var(--fg-2);box-shadow:var(--shadow);margin:0 0 6px;}
+  pre code{background:none;padding:0;color:var(--fg-2);}
+  .resume .secbody{background:var(--fg-1);color:#EDE9E3;border-radius:var(--radius-lg);padding:20px 24px;margin-top:14px;}
+  .resume pre{background:#231e1a;border:1px solid #3a332d;color:#D9D2CA;font-size:12.5px;box-shadow:none;margin:0;}
+  .raw pre{max-height:520px;overflow:auto;font-size:11.5px;white-space:pre-wrap;word-break:break-word;}
+  .raw .hint{font-size:11px;color:var(--fg-3);margin:0 0 8px;}
+  footer{max-width:var(--maxw);margin:48px auto 0;padding:20px 28px 36px;border-top:1px solid var(--border);display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--fg-3);}
+  .controls{max-width:var(--maxw);margin:18px auto 0;padding:0 28px;text-align:right;}
+  .controls button{font-family:var(--font-mono);font-size:10.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--fg-3);background:none;border:1px solid var(--border);border-radius:20px;padding:5px 12px;cursor:pointer;}
+  .controls button:hover{color:var(--red-700);border-color:var(--red-500);}
+  @media (max-width:640px){h1{font-size:34px;}h2{font-size:23px;}.cards,.grid2{grid-template-columns:1fr;}.commit{grid-template-columns:72px 1fr;}}
+  @media print{:root{--paper:#fff;}body{background:#fff;font-size:11pt;}.card,.nugget,.stat,pre{box-shadow:none;}
+    .controls,summary .chev{display:none;}details>.secbody{display:block!important;}
+    details,.card,.nugget,.commit{page-break-inside:avoid;}*{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <span class="logo"><span class="flag">GPX</span><span class="word">Stream</span></span>
+    <span class="doc-meta"><span class="tag">Session Recap · Internal</span><br />RootEncoder fork · 2026-08-19</span>
+  </div>
+  <div class="topdivide"><hr /></div>
+  <div class="wrap">
+    <div class="hero">
+      <p class="eyebrow">Session Recap · 2026-08-19 17:37</p>
+      <h1>Upstream Sync R31 + Frame-Timing Port R32</h1>
+      <p class="standfirst">gpx-2.8 caught up with Pedro (23 commits — headline: a ~470 ms A/V sync fix in our exact configuration), R1 became the fork's first retired patch, Anton's frame-timing seam landed as R32, and the whole sync procedure is now a repo skill.</p>
+      <div class="stats">
+        <div class="stat"><b>R31</b><span>Upstream merged</span></div>
+        <div class="stat"><b>R1</b><span>First patch retired</span></div>
+        <div class="stat"><b>R32</b><span>Timing seam ported</span></div>
+        <div class="stat"><b>Green</b><span>assembleDebug test</span></div>
+        <div class="stat"><b>Untagged</b><span>Pin move pending</span></div>
+      </div>
+    </div>
+    <div class="controls">
+      <button type="button" onclick="document.querySelectorAll('details').forEach(d=>d.open=true)">Expand all</button>
+      <button type="button" onclick="document.querySelectorAll('details').forEach(d=>d.open=false)">Collapse all</button>
+    </div>
+
+    <details open>
+      <summary><span class="htext"><span class="sec-eyebrow">Status</span><h2>The Two Questions, Answered</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody cards">
+        <div class="card"><span class="tag"><span class="dot ok"></span>Worth updating? Yes</span>
+          <p>Upstream fixes a measured <strong>~470 ms video-ahead A/V offset</strong> in SURFACE mode — GL-surface video + mic audio is exactly our configuration. Plus GL timestamp jitter rework, a timestamp-based fps limiter, null-safe codec capability reads, and SRT robustness.</p></div>
+        <div class="card"><span class="tag"><span class="dot ok"></span>Patches superseded? One — R1</span>
+          <p>Upstream's <code>isCBRModeSupported</code> now carries R1's null-guard plus an exception guard R1 lacked. <code>CodecUtil.java</code> is byte-identical to upstream again. Everything else stays — R9 <strong>composes</strong> with the new PTS rebase rather than colliding.</p></div>
+      </div>
+    </details>
+
+    <details open>
+      <summary><span class="htext"><span class="sec-eyebrow">Next</span><h2>Open Items</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <ul class="check">
+          <li><strong>Tag <code>2.8.0-gpx4</code> + pin move — Andy's call, bench-gated.</strong> R31 touches the live video path everywhere; the bench watch is A/V sync (should improve) and frame pacing. R32 is inert until the app sets a listener.</li>
+          <li><strong>Optionally wire R32 in the app</strong> — <code>setStreamVideoFrameTimingListener</code> gives per-frame pipeline latency for the frame-timing investigation.</li>
+          <li>R24's four item-specific bench provocations (R23/R25/R26/R27) remain standing watch items — honestly unticked in the re-apply plan.</li>
+        </ul>
+      </div>
+    </details>
+
+    <details>
+      <summary><span class="htext"><span class="sec-eyebrow">Landed</span><h2>Commits<span class="count">4</span></h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody timeline">
+        <div class="commit"><span class="hash">dab9e93</span><span class="msg"><strong>GPX R31</strong> — merge pedro/master @ 300d99fe1. 3 conflicts resolved; R1 retired; policy + re-apply docs brought current in the same commit.</span></div>
+        <div class="commit"><span class="hash">15dce8d</span><span class="msg"><strong>GPX R32</strong> — Anton's encoded-frame timing seam cherry-picked from teaky-frame-timing; capture point kept above R31's rebase; markers normalized.</span></div>
+        <div class="commit"><span class="hash">4cfc106</span><span class="msg"><strong>upstream-sync skill</strong> — the repeatable procedure at .claude/skills/upstream-sync/SKILL.md.</span></div>
+        <div class="commit"><span class="hash">master</span><span class="msg">Mirror fast-forwarded 02b8e9cce → <strong>300d99fe1</strong> and pushed to andoodle.</span></div>
+      </div>
+    </details>
+
+    <details>
+      <summary><span class="htext"><span class="sec-eyebrow">Reference</span><h2>Gotchas<span class="count">3</span></h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody grid2">
+        <div class="nugget"><h3>Git Bash colon-path mangling</h3><p><code>git show ref:.claude/file</code> breaks on Windows Git Bash — read via the worktree checkout instead.</p></div>
+        <div class="nugget"><h3>/.claude is gitignored</h3><p>Tracked docs under it override the ignore, but new files (the skill, this recap) need <code>git add -f</code>.</p></div>
+        <div class="nugget"><h3>Worktree is the gpx-2.8 home</h3><p>Merge in <code>.claude/worktrees/gpx-2.8</code>; the main checkout stays on gpx-master.</p></div>
+      </div>
+    </details>
+
+    <details class="raw">
+      <summary><span class="htext"><span class="sec-eyebrow">For the record</span><h2>Full Record + AI Notes</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <p class="hint">Complete raw recap + Claude's scratch notes — the same canonical block the AI reads from the top of this file.</p>
+        <pre id="fullmd"></pre>
+      </div>
+    </details>
+  </div>
+  <footer><span>GPX Stream · Session Recap · 2026-08-19 17:37</span><span>Internal — RootEncoder fork</span></footer>
+  <script>document.getElementById('fullmd').textContent=document.getElementById('recap').textContent.trim();</script>
+</body>
+</html>
