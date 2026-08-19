@@ -9,14 +9,14 @@ pinned to one cannot be moved to the other without code changes.
 |---|---|---|
 | `master` | — | Mirror of `pedroSG94/RootEncoder` master. Fast-forward only, never a GPX commit. |
 | `gpx-master` | upstream `49421b686` (2026-07-20) | Frozen. The line `gpxnative-ai` builds against. |
-| `gpx-2.8` | upstream `9a9ca124f` (2026-07-30) | Active. The line `gpxstream-app` builds against. Synced forward since; latest merged upstream is `02b8e9cce` (R27, 2026-08-04). |
+| `gpx-2.8` | upstream `9a9ca124f` (2026-07-30) | Active. The line `gpxstream-app` builds against. Synced forward since; latest merged upstream is `300d99fe1` (R31, 2026-08-19). |
 
 ## Tags and who consumes them
 
 | Tag line | Head tag | Consumer |
 |---|---|---|
 | `2.7.5-gpx*` | `2.7.5-gpx25` | `gpxnative-ai` |
-| `2.8.0-gpx*` | `2.8.0-gpx1` | `gpxstream-app` |
+| `2.8.0-gpx*` | `2.8.0-gpx3` | `gpxstream-app` |
 
 JitPack builds per tag, so a pin resolves the tagged commit regardless of what any branch
 does afterwards. Moving `gpx-2.8` cannot affect a consumer pinned to `2.7.5-gpx25`.
@@ -50,8 +50,9 @@ given. `GPX patch` where no item covers it — several small changes were made a
 item and were never enumerated separately. A bare `GPX patch` is preferred over guessing a number,
 because a wrong attribution is worse than an absent one.
 
-**Coverage: all 32 files that differ from the merged upstream head carry at least one marker**
-(swept 2026-08-04 against `pedro/master` @ `02b8e9cce`). The baseline is the *merged* upstream head,
+**Coverage: all 31 files that differ from the merged upstream head carry at least one marker**
+(swept 2026-08-19 against `pedro/master` @ `300d99fe1`; the count dropped from 32 because R1's
+file, `CodecUtil.java`, no longer differs — upstream absorbed the change and R1 retired). The baseline is the *merged* upstream head,
 not the branch point: since R26 and R27 brought upstream commits in, a diff against the original
 `9a9ca124f` base also lists files upstream changed, which carry no GPX work and never will. Two
 caveats on reading a grep as complete:
@@ -72,14 +73,15 @@ legible without running it.
   reason and its own approval from the consumer side — "the fork is open anyway" is never one
   (the gpxstream-app fork-edit rule).
 - **Built as R28 — per-encoder re-prepare (authorized at the gpxstream-app S8 gate, F2, Andy
-  2026-08-12; ships as `2.8.0-gpx2`).** `StreamBase.applyVideoStreamConfig` and
+  2026-08-12; shipped as `2.8.0-gpx2`).** `StreamBase.applyVideoStreamConfig` and
   `StreamBase.applyVideoRecConfig`: a scoped re-prepare that rebuilds one video encoder while
   the other encoder and the muxer keep running, stream side and record side each; honours the
   existing invariants (the record/stream aspect-ratio equality check, the record parameter
   set and its `recordCodecPrepared` claim discipline, B-frame suppression and the
-  negotiated-format listener surviving a re-prepare). Device proof of the concurrent-encoder
-  path is the consumer's bench gate (R-STR-14's named risk) — the app runs its full-quiesce
-  fallback until that passes. Design home: `gpxstream-app/docs/design/S8_recording_vod.md`
+  negotiated-format listener surviving a re-prepare). Device-proven on the consumer's bench
+  PDT (gpxstream-app #78, 2026-08-14): a stream resolution change and a codec change ran with
+  the recording rolling unbroken, and two H265 encoders allocated concurrently — R-STR-14's
+  named risk, cleared. Design home: `gpxstream-app/docs/design/S8_recording_vod.md`
   (F2), build placement in its implementation plan (WP9).
 - **Never reuse or move a published tag.** JitPack caches builds per tag; a moved tag serves
   stale or mismatched artifacts.
@@ -89,7 +91,8 @@ legible without running it.
 
 ## Verification status of the `2.8.0-gpx*` line
 
-`gradlew assembleDebug test` passes across every module and the sample app at both tags.
+`gradlew assembleDebug test` passes across every module and the sample app at every tag and at
+the branch head.
 
 **`2.8.0-gpx1` — device-proven over WHIP (2026-08-02).** On a bench PDT-FP1 the WHIP path
 reached `Streaming` against the Millicast ingest and video was watched end to end on the
@@ -98,28 +101,19 @@ camera retained, and switching between all three inputs was exercised on the sam
 covered: duration, a degrading link, and a moving vehicle — nothing has run for hours or in
 adverse conditions.
 
-**Branch head, ahead of `2.8.0-gpx1` and untagged — build-verified only.** It carries R23, the
-bounded camera open; R25, frame-rate ranges asked of a named camera; R26, the merge of upstream
-`pedro/master` @ `58af3fb1b`; and R27, the merge of upstream `pedro/master` @ `02b8e9cce`.
+**`2.8.0-gpx2` (R23, R25, R26, R27, R28) — shipped 2026-08-12 with the consumer's pin move
+(gpxstream-app #46), superseding R24's tag hold.** On the bench PDT the consumer's #78 pass
+(2026-08-14) exercised R28 directly: a stream resolution change and a codec change ran with the
+recording rolling unbroken, and two H265 encoders allocated concurrently. The item-specific
+provocations R24's bench checklist named for R23/R25/R26/R27 have no recorded pass and stay open
+as watch items — the ordinary paths they sit on have run on the bench since without incident.
 
-R23's changed paths are the ones a healthy open never takes: the timeout, and a framework callback
-arriving for an attempt already given up on. Neither has been provoked on hardware, and a normal
-open is unaffected by construction (the wait resolves in 13-19 ms against a 3,000 ms bound).
+**`2.8.0-gpx3` (R29, R30) — shipped and pinned; concurrency coverage is build-verified.** Both
+changes rode the consumer's #78 bench build. Their specific interleavings (a wedged muxer write,
+a stopRecord racing a stopStream) are not reproducible on a bench, so device proof is of the
+unbroken ordinary paths, not the races. `gpxstream-app`'s pin is `2.8.0-gpx3`.
 
-R25 changes every open, so it wants watching on the bench: an external input's capture request now
-carries a frame-rate range from that input's own advertised list rather than from the built-in
-sensor's. The old behaviour was tolerated by this hardware, so the visible outcome should be no
-change; a *difference* in behaviour is the thing to look for.
-
-R26 brings a buffer pool that recycles the arrays every encoded frame is copied into, on both the
-stream and the record path. A buffer reused while a frame is still in flight would corrupt picture
-or sound rather than crash, which no build can catch — so it joins the bench list.
-
-R27 brings upstream's send-queue statistics, an encoder crash-recovery budget and new Camera2
-white-balance controls. The app calls none of them, and the statistics callback is a default
-method, so no app code changes. One line does change every stream start: `BaseSender.start()` now
-cancels and joins any previous send job first. That joins the bench list; the rest is either
-unreachable from this app or only reached after an encoder has already crashed.
-
-The tag is deliberately held until the bench pass — see R24 in the re-apply plan, which carries the
-checklist.
+**Branch head, ahead of `2.8.0-gpx3` and untagged — build-verified only.** It carries R31, the
+merge of upstream `pedro/master` @ `300d99fe1` (surface-PTS rebase onto the shared start, the
+GL timestamp rework, a timestamp-based fps limiter — all on the live video path, so the next
+consumer pin move wants a bench watch for A/V sync and frame pacing).

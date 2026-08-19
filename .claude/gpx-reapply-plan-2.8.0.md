@@ -191,14 +191,73 @@ patch, so every item is *keep and re-apply*. What was checked, and why each stay
 
 Marker check: the `GPX` marker inventory is byte-identical before and after the merge — 24 distinct
 tags, same counts — so no patch was silently dropped by an auto-resolved hunk.
-- [ ] R24 — Tag `2.8.0-gpx2` and bump the pin in `gpxstream-app`'s CLAUDE.md and
-      `docs/PHASE_3_PLAN.md`. **Deliberately deferred** (owner ruling 2026-08-03): a published tag
-      cannot be moved and JitPack caches per tag, so the tag is cut once the bench PDT has exercised
-      the items below rather than while they are build-verified only. `gpxstream-app` builds against
-      this branch meanwhile through the `rootencoder.local` composite-build switch, so nothing is
-      blocked. The pin stays at `2.8.0-gpx1` until then.
+- [x] R31 — Merge upstream `pedro/master` @ `300d99fe1` (23 commits, 17 of them non-merge, past the
+      `02b8e9cce` R27 base). Carries no new GPX code and adds no `GPX R31` marker. What arrives:
+      - **The surface-PTS rebase** (`52b7d145f`). In SURFACE mode `checkBuffer` rebased every video
+        frame on the PTS of the encoder's own first output, while the audio encoder rebases on the
+        shared `presentTimeUs` origin — so camera-open and GL warm-up time became a constant offset
+        with video ahead of audio (measured upstream at ~470 ms). The new `rebaseSurfacePts` rebases
+        on the shared origin when the surface clock matches it. This is our exact configuration
+        (GL-surface video plus microphone audio), so it is the headline reason to take this sync.
+      - **The GL timestamp rework** (`a21ccf515`, `f1693b3e4`, `4caaf7dff`, `911fc2366`). A new
+        `GlTimestamp` anchors surface-texture timestamps to the shared `TimeUtils` clock and clamps
+        per-frame drift; `draw()` takes a clock timestamp read under a monitor when the frame is
+        queued, and the fps-limit decision moved onto that timestamp.
+      - **A timestamp-based `FpsLimiter`** (`6b100ee97`, plus `cc2d82e07` for Camera1). Rewritten
+        from wall-clock ratios to nanosecond frame intervals judged against the frame's own
+        timestamp. `VideoEncoder.getInputFrame` and both GL views now pass the timestamp in; the
+        old `setFrameStartTs`/`getSleepTime` pair is gone and nothing of ours called it.
+      - **CodecUtil capabilities hardening** (`15f5a40bd`). A null-safe `getCapabilities` helper
+        (catches the vendor exception and logs) now guards every `getCapabilitiesForType` call, and
+        `isCBRModeSupported` checks both the capabilities and the encoder-capabilities for null.
+        **This retires R1** — see the per-item table below.
+      - **SRT control packets without a body** (`14662a67d`). `Ack2`, `CongestionWarning`,
+        `KeepAlive`, `Shutdown` and `DropReq` now parse an empty body safely instead of the read
+        loop failing the stream. Orthogonal to R7/R8, which live in the handshake and silence paths.
+      - **The rotated-resolution announce** (`ddfac19c8`). `getVideoResolution()` swaps width and
+        height when rotation is 90/270 so portrait streams are announced portrait. This app streams
+        landscape (rotation 0), so no behavioural change here.
+      - **A record-controller test seam** (`0784cf329`). `onFrameRecycled()`, called after the
+        buffer returns to the pool; default no-op. Sits beside R12/R29 without touching them.
+      - **Sources this app does not use** (`fbe833bdd` CameraX stop and file-source loop,
+        `2b4e1ea79` BitmapSource sleep), and housekeeping: media3-inspector 1.11.0, sample-app
+        drawables moved into `app/`, a workflow-dispatch CI trigger, an `SrtSenderTest` timeout fix.
 
-      Bench checklist before the tag:
+      Three conflicts. `CodecUtil.isCBRModeSupported` resolved by taking upstream whole (the R1
+      retirement). `VideoEncoder` is pure adjacency — R18's `logNegotiatedFormat` helpers and
+      upstream's new `rebaseSurfacePts` were inserted at the same point; both kept. In
+      `GlStreamInterface`, R16's pending-release wait and upstream's `glTimestamp.reset()` both
+      open `start()` (kept both, R16 first, since the reset must not run while the old release is
+      still tearing down), and upstream inlined a new timestamped force-render callback where R11
+      keeps a shared one — kept R11's shared-callback shape and moved its body to upstream's
+      timestamped form, so `start()` and the live toggle stay on one implementation.
+
+      **Per-item outcome under the take-theirs ruling (Andy, 2026-08-04): R1 retires.** Upstream's
+      `isCBRModeSupported` now returns false on a null `getEncoderCapabilities()` — behaviourally
+      identical to R1 — and adds an exception guard R1 did not have, so upstream is a superset and
+      nothing is lost. Every other item stays:
+
+      | Item | Nearest upstream work this sync | Why it stays |
+      |---|---|---|
+      | R9 continuous timestamps | `rebaseSurfacePts` re-anchoring | Composes rather than collides: the rebase re-anchors only when `firstTimestamp == 0`, which is exactly the reset R9's `forceContinuousTs` suppresses across a restart. Upstream still has no continuity option. |
+      | R16 GL teardown wait, R11 overlay + force-render, R5 photo size | The GL timestamp rework | Upstream's work is in the draw/timestamp path; `pendingRelease`, the overlay plane and the photo size are untouched outside the two resolved conflicts. |
+      | R7/R8 SRT dead-link + handshake retransmit | Bodyless control packets | Different layer: upstream fixes packet parsing in the read loop; R7/R8 live in the handshake retransmit and inbound-silence accounting, untouched. |
+      | R12 byte counter, R29 bounded join | `onFrameRecycled` test seam | Additive hook beside them; the join and the counter are untouched. |
+      | R23/R25 Camera2 open + fps ranges | `cc2d82e07` Camera1 fps | Upstream's camera change is Camera1-only; `Camera2ApiManager` is not in this sync's changed files. |
+      | R2–R4, R6, R10, R13–R15, R17–R19, R28, R30, `GPX patch` items | — | Their code is not touched by this sync's changed files, or (R18, StreamBase) only by the resolved adjacency conflicts above. |
+
+      Marker check: the inventory differs from pre-merge by exactly the R1 marker (deliberately
+      removed with its patch) and R11's marker comment extended to note the new callback body —
+      142 marker lines against 143, nothing silently dropped.
+- [x] R24 — Tag `2.8.0-gpx2` and bump the pin in `gpxstream-app`. **Done 2026-08-12**: the tag
+      was cut at `a88f8d58f` (R28 included) with the consumer's pin move (gpxstream-app #46) for
+      the S8 tier flip, superseding the 2026-08-03 hold; `2.8.0-gpx3` followed 2026-08-13 with
+      R29/R30, and the consumer's pin sits there now. The consumer's #78 bench pass (2026-08-14)
+      exercised R28's scoped re-prepare and concurrent-encoder path on the PDT.
+
+      The item-specific bench provocations below have no recorded pass — the boxes stay unticked
+      as standing watch items, not as a tag gate (the ordinary paths they sit on have run on the
+      bench since without incident):
       - [ ] **R23, the bounded camera open.** Its changed paths are the ones a healthy open never
             takes — the timeout, and a framework callback arriving for an abandoned attempt. Provoke
             them rather than waiting for them.
@@ -239,10 +298,11 @@ disconnect, `a=setup` parsing into `SdpInfo.setupRole`, `lastOrNull` in `SdpPars
 
 ## Verification status
 
-`gradlew assembleDebug test` passes across every module and the sample app. Nothing in this
-branch has been run on a device or against a live ingest. The WHIP behaviour above was
-originally established by testing against Dolby and Millicast; it is re-derived here and not
-re-proven.
+`gradlew assembleDebug test` passes across every module and the sample app. The branch has
+since been device-proven in stages — the current state per tag lives in
+`.claude/gpx-branch-policy.md`'s "Verification status" section, which is the one home for that
+claim. The WHIP behaviour above was originally established by testing against Dolby and
+Millicast; it was re-derived here and then re-proven on the bench at `2.8.0-gpx1` (2026-08-02).
 
 File-coverage check: every file the old branch changed (excluding its session-recap HTML) is
 also changed on this branch, and this branch changes no other files.

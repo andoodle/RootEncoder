@@ -342,8 +342,11 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   }
 
   private FormatVideoEncoder chooseColorDynamically(MediaCodecInfo mediaCodecInfo) {
+    MediaCodecInfo.CodecCapabilities codecCapabilities =
+        CodecUtil.getCapabilities(mediaCodecInfo, type.getMime());
+    if (codecCapabilities == null || codecCapabilities.colorFormats == null) return null;
     List<Integer> colors = new ArrayList<>();
-    for (int color : mediaCodecInfo.getCapabilitiesForType(type.getMime()).colorFormats) colors.add(color);
+    for (int color : codecCapabilities.colorFormats) colors.add(color);
 
     if (colors.contains(FormatVideoEncoder.YUV420PLANAR.getFormatCodec())) {
       return FormatVideoEncoder.YUV420PLANAR;
@@ -532,7 +535,8 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
     Log.i(TAG, mediaCodecInfoList.size() + " encoders found");
     for (MediaCodecInfo mci : mediaCodecInfoList) {
       Log.i(TAG, "Encoder " + mci.getName());
-      MediaCodecInfo.CodecCapabilities codecCapabilities = mci.getCapabilitiesForType(mime);
+      MediaCodecInfo.CodecCapabilities codecCapabilities = CodecUtil.getCapabilities(mci, mime);
+      if (codecCapabilities == null || codecCapabilities.colorFormats == null) continue;
       for (int color : codecCapabilities.colorFormats) {
         Log.i(TAG, "Color supported: " + color);
         if (formatVideoEncoder == FormatVideoEncoder.SURFACE) {
@@ -553,7 +557,7 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   protected Frame getInputFrame() throws InterruptedException {
     Frame frame = queue.take();
     if (frame == null) return null;
-    if (fpsLimiter.limitFPS()) return getInputFrame();
+    if (fpsLimiter.limitFPS(frame.getTimeStamp() * 1000)) return getInputFrame();
     byte[] buffer = frame.getBuffer();
     boolean isYV12 = frame.getFormat() == ImageFormat.YV12;
 
@@ -619,6 +623,21 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
     } catch (Exception e) {
       return "-";
     }
+  }
+
+  /**
+   * Surface mode: rebase the timestamp to something relative. The GlInterface stamps the surface
+   * with the TimeUtils clock, so we share the origin with the audio encoder. A surface fed directly
+   * (decoder in FromFileBase, MediaProjection in DisplayBase without opengl) uses another time base
+   * and must be rebased against its own first frame.
+   * Using 1 second to difference both ways.
+   */
+  private long rebaseSurfacePts(long pts) {
+    if (firstTimestamp == 0) {
+      boolean sharedClock = presentTimeUs > 0 && Math.abs(pts - TimeUtils.getCurrentTimeMicro()) < 1_000_000;
+      firstTimestamp = sharedClock ? presentTimeUs : pts;
+    }
+    return Math.max(0, pts - firstTimestamp);
   }
 
   @Override
@@ -687,12 +706,10 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
         // Buffer mode: synthesize PTS from wall clock.
         bufferInfo.presentationTimeUs = TimeUtils.getCurrentTimeMicro() - presentTimeUs;
       } else {
-        // Surface mode: EGL timestamp is camera sensor time (nanoseconds from boot ÷ 1000).
-        // It has clean, jitter-free intervals — but it's a huge absolute value that breaks RTMP.
-        // Rebase to relative by subtracting the first frame's PTS → clean intervals, starts at 0.
-        if (firstTimestamp == 0) firstTimestamp = bufferInfo.presentationTimeUs;
-        bufferInfo.presentationTimeUs -= firstTimestamp;
+        bufferInfo.presentationTimeUs = rebaseSurfacePts(bufferInfo.presentationTimeUs);
       }
+    } else if (formatVideoEncoder == FormatVideoEncoder.SURFACE) {
+      bufferInfo.presentationTimeUs = rebaseSurfacePts(bufferInfo.presentationTimeUs);
     } else {
       if (firstTimestamp == 0) firstTimestamp = bufferInfo.presentationTimeUs;
       bufferInfo.presentationTimeUs -= firstTimestamp;

@@ -114,6 +114,8 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
   private var previewViewPort: ViewPort? = null
   private var streamViewPort: ViewPort? = null
   private var surfaceHandlerThread: HandlerThread? = null
+  private val sync = Any()
+  private val glTimestamp = GlTimestamp()
 
   private val sensorRotationManager = SensorRotationManager(context, true, true) { orientation, isPortrait ->
     if (autoHandleOrientation && shouldHandleOrientation) {
@@ -165,13 +167,17 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
     setForceRender(enabled, 5)
   }
 
-  // GPX R11 — shared by start() and the live setForceRender toggle above.
+  // GPX R11 — shared by start() and the live setForceRender toggle above. Body follows upstream's
+  // timestamped force-render draw: the clock is read under sync and travels with the task.
   private val forceRenderCallback: () -> Unit = {
-    executor?.execute {
-      try {
-        draw(true)
-      } catch (e: RuntimeException) {
-        renderErrorCallback?.onRenderError(e) ?: throw e
+    synchronized(sync) {
+      val timestamp = TimeUtils.getCurrentTimeNano()
+      executor?.execute {
+        try {
+          draw(true, timestamp)
+        } catch (e: RuntimeException) {
+          renderErrorCallback?.onRenderError(e) ?: throw e
+        }
       }
     }
     Unit
@@ -267,6 +273,7 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
       }
     }
     pendingRelease = null
+    glTimestamp.reset()
     threadQueue.clear()
     executor?.shutdownNow()
     executor = null
@@ -338,9 +345,8 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
     streamOverlayRender.release()
   }
 
-  private fun draw(forced: Boolean) {
+  private fun draw(forced: Boolean, clockTimestamp: Long) {
     if (!isRunning) return
-    val limitFps = fpsLimiter.limitFPS()
     if (!forced) forceRender.frameAvailable()
 
     if (!filterQueue.isEmpty() && mainRender.isReady()) {
@@ -359,9 +365,9 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
       if (!surfaceManager.makeCurrent()) return
       mainRender.updateFrame()
       mainRender.drawSource()
-      surfaceManager.swapBuffer()
     }
-    val timestamp = TimeUtils.getCurrentTimeNano()
+    val timestamp = glTimestamp.getTimestamp(surfaceTexture.timestamp, clockTimestamp)
+    val limitFps = fpsLimiter.limitFPS(timestamp)
 
     val orientation = when (orientationForced) {
       OrientationForced.PORTRAIT -> true
@@ -451,11 +457,14 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
 
   override fun onFrameAvailable(surfaceTexture: SurfaceTexture?) {
     if (!isRunning) return
-    executor?.execute {
-      try {
-        draw(false)
-      } catch (e: RuntimeException) {
-        renderErrorCallback?.onRenderError(e) ?: throw e
+    synchronized(sync) {
+      val timestamp = TimeUtils.getCurrentTimeNano()
+      executor?.execute {
+        try {
+          draw(false, timestamp)
+        } catch (e: RuntimeException) {
+          renderErrorCallback?.onRenderError(e) ?: throw e
+        }
       }
     }
   }
@@ -630,6 +639,7 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
   }
 
   override fun forceFpsLimit(fps: Int) {
+    glTimestamp.setFps(fps)
     fpsLimiter.setFPS(fps)
   }
 
