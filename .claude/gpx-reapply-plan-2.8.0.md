@@ -260,6 +260,66 @@ tags, same counts — so no patch was silently dropped by an auto-resolved hunk.
       sits deliberately *above* R31's `rebaseSurfacePts`, preserving the "unre-based" meaning now
       that upstream rewrites the PTS in place. Cherry-picked clean; markers normalized to
       `GPX R32`.
+- [x] R33 — Swappable network transport (`gpxstream-app` issue #110, PART 2: a protocol change
+      RTMP<->WHIP<->SRT becomes publisher-only, no longer a full quiesce that stops a rolling
+      recording). Before this, `StreamBaseFactory` picked a whole different `StreamBase`
+      subclass per protocol (`WhipStream` for WHIP, `GenericStream` otherwise), and `StreamBase`
+      owns `videoEncoder`, `videoEncoderRecord`, `audioEncoder` and `recordController` as
+      private per-instance fields, so a protocol change threw the whole object away and rebuilt
+      the recording path too, unconditionally. New package
+      `library/src/main/java/com/pedro/library/transport/`:
+      - `StreamTransport` — the network-transport interface GenericStream/WhipStream's protocol
+        clients sat behind implicitly. `connect()` carries `resolution: Size, fps: Int` because
+        `GenericStream.startStreamImp`'s RTMP branch reads `StreamBase`'s protected
+        `getVideoResolution()`/`getVideoFps()`, unreachable from a delegate held outside
+        `StreamBase`.
+      - `GenericTransport` / `WhipTransport` — mechanical ports of `GenericStream`'s and
+        `WhipStream`'s bodies (same four clients, same `ClientType` state machine, same R16b
+        failure text; one stable `WhipStreamClient` per instance rather than
+        `WhipStream.getStreamClient()`'s per-call rebuild). Each sets its protocol's canonical
+        audio codec at construction — `GenericTransport` -> AAC on all four clients,
+        `WhipTransport` -> OPUS — deterministically, mirroring `WhipStream`'s own
+        constructor-time `setAudioCodec(OPUS)`.
+      - `SwitchableStream` — the new `StreamBase` subclass that replaces both `GenericStream` and
+        `WhipStream` as the app's implementation. Holds one `@Volatile` `StreamTransport`
+        delegate; `switchTransport(factory)` throws while streaming (the caller quiesces the
+        publisher first, same shape as `applyVideoStreamConfig`'s caller-quiesces contract),
+        builds the next transport, primes it via `TransportPrimer` with whatever
+        codec/video-info/audio-info the discarded transport last carried, then swaps the
+        reference. Zero edits to `StreamBase.kt`.
+      - `TransportPrimer` — the replay extracted as a pure function (codec, then video info,
+        then audio info — cold-start order) so it is unit-testable without an Android runtime.
+        Each prime duplicates its cached buffers fresh, so two swaps before either encoder
+        produces new info each get an independently positioned, fully-remaining buffer rather
+        than one a previous prime already drained.
+      - **The one omission no build catches:** `SwitchableStream` owns a single
+        `StreamClientListener` (`onRequestKeyframe` -> `requestKeyframe()`) and passes it to
+        every transport factory, both at construction and on every swap — a transport built with
+        its own throwaway listener would silently lose retry-driven keyframe requests, with
+        nothing failing loudly.
+      - **Audio-codec priming is deliberately NOT replayed** across a swap — each transport sets
+        its own canonical codec at construction, and priming one transport's choice onto another
+        would fight that. Stated in both `TransportPrimer`'s and `SwitchableStream`'s KDoc.
+      - **Deviation from the reviewed app-side design doc:** `SwitchableStream`'s constructor
+        drops the `connectChecker` parameter the design specified — `GenericStream`/`WhipStream`
+        needed it because they built their clients inline in the constructor body;
+        `SwitchableStream` never builds a client directly, so the parameter would sit unused
+        (every transport factory, including the one passed to `switchTransport`, already closes
+        over whatever `ConnectChecker` it needs). Recorded here since it was reviewer-approved
+        structure being deliberately simplified during the build, not silently changed.
+      - Coverage: `TransportPrimer`'s replay order, the two-swap independent-buffer invariant,
+        the null-cache no-op case, and a discarded-transport post-disconnect contract are unit
+        tests on a fake `StreamTransport` (`TransportPrimerTest`). `GenericTransport` and
+        `WhipTransport` both construct on the plain JVM under this module's
+        `isReturnDefaultValues = true` unit-test config — confirmed, not assumed
+        (`TransportConstructionTest`); the underlying RootEncoder clients expose no getter for
+        the codec they were handed, so what is asserted is that construction (which reaches the
+        canonical-codec `setAudioCodec` call) does not throw, not the codec value itself.
+        `SwitchableStream` itself cannot construct on the plain JVM — `StreamBase`'s constructor
+        reaches `android.jar` surfaces `isReturnDefaultValues` does not stub (the same fact
+        `gpxstream-app`'s `libs.versions.toml` mockk note already carries) — so its
+        delegate-routing and swap paths are covered by the consumer's driver tests through the
+        composite build, plus the bench gate.
 - [x] R24 — Tag `2.8.0-gpx2` and bump the pin in `gpxstream-app`. **Done 2026-08-12**: the tag
       was cut at `a88f8d58f` (R28 included) with the consumer's pin move (gpxstream-app #46) for
       the S8 tier flip, superseding the 2026-08-03 hold; `2.8.0-gpx3` followed 2026-08-13 with

@@ -116,5 +116,13 @@ unbroken ordinary paths, not the races. `gpxstream-app`'s pin is `2.8.0-gpx3`.
 **Branch head, ahead of `2.8.0-gpx3` and untagged — build-verified only.** It carries R31, the
 merge of upstream `pedro/master` @ `300d99fe1` (surface-PTS rebase onto the shared start, the
 GL timestamp rework, a timestamp-based fps limiter — all on the live video path, so the next
-consumer pin move wants a bench watch for A/V sync and frame pacing), and R32, the encoded-frame
-timing seam ported from `teaky-frame-timing` (inert until a listener is set).
+consumer pin move wants a bench watch for A/V sync and frame pacing), R32, the encoded-frame
+timing seam ported from `teaky-frame-timing` (inert until a listener is set), and R33, the
+swappable network-transport seam (`library/src/main/java/com/pedro/library/transport/`:
+`StreamTransport`, `GenericTransport`, `WhipTransport`, `SwitchableStream`, `TransportPrimer`) —
+consumer issue #110, so a protocol change no longer forces a full rebuild of the recording path.
+Zero edits to `StreamBase.kt`. `gradlew assembleDebug test` passes across every module and the
+sample app with R33 in the tree. A consumer pin move onto this head therefore also promotes the
+27 previously-unbenched R31/R32 commits at the same time, so the next bench gate consciously
+widens to cover R31/R32's A/V-sync and frame-pacing watch items alongside R33's live protocol
+swaps.
