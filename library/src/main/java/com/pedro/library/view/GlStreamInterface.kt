@@ -28,7 +28,6 @@ import android.view.Surface
 import androidx.annotation.RequiresApi
 import com.pedro.common.TimeUtils
 import com.pedro.common.newSingleThreadExecutor
-import com.pedro.common.secureSubmit
 import com.pedro.encoder.input.gl.FilterAction
 import com.pedro.encoder.input.gl.SurfaceManager
 import com.pedro.encoder.input.gl.render.MainRender
@@ -61,6 +60,11 @@ import kotlin.math.max
 // release, short enough that a caller blocked in stop() -- which can reach the main thread through
 // StreamBase.stopPreview()'s SurfaceHolder callback -- is not held for long.
 private const val STOP_RELEASE_AWAIT_MS = 300L
+
+// GPX R34 — bound for start()'s wait on the queued GL-init task. Matches secureSubmit's previous
+// default timeout so normal-path timing is unchanged; the difference is that a miss now throws
+// instead of being swallowed. See the GPX R34 comment on start() for why.
+private const val START_INIT_AWAIT_MS = 5000L
 
 /**
  * Created by pedro on 14/3/22.
@@ -288,7 +292,16 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
     surfaceManagerPhoto.release()
     surfaceManagerPhoto.eglSetup(width, height, surfaceManager)
     sensorRotationManager.start()
-    executor?.secureSubmit {
+    // GPX R34 — track the GL-init task and await it before returning, mirroring the pendingRelease
+    // wait above. The previous executor?.secureSubmit { ... } here also blocked the caller, but on a
+    // timeout or a thrown exception it swallowed both silently (secureSubmit's catch block is empty)
+    // and start() returned as if GL init had finished, with `running` still false and mainRender
+    // possibly left half-initialized. Every caller -- StreamBase.startPreview(), warmSources() and
+    // startSources() -- reads glInterface.surfaceTexture on the very next line with no wait of its
+    // own, so a swallowed failure handed the camera a not-yet-created or stale SurfaceTexture. This
+    // was the root cause of gpxstream-app issue #108: a preview-only race that surfaced as a false
+    // "CAMERA DIDN'T START" error over an otherwise-healthy headless recording.
+    val initTask = executor?.submit {
       surfaceManager.makeCurrent()
       mainRender.initGl(context, width, height, width, height)
       running.set(true)
@@ -299,6 +312,25 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
         mainRender.getSurfaceTexture().setOnFrameAvailableListener(this)
       }
       forceRender.start(forceRenderCallback)
+    }
+    initTask?.let { task ->
+      try {
+        task.get(START_INIT_AWAIT_MS, TimeUnit.MILLISECONDS)
+      } catch (e: TimeoutException) {
+        throw IllegalStateException(
+          "GlStreamInterface.start(): GL init did not complete within ${START_INIT_AWAIT_MS}ms; " +
+            "surfaceTexture is not safe to read yet.", e
+        )
+      } catch (e: ExecutionException) {
+        throw IllegalStateException(
+          "GlStreamInterface.start(): GL init failed.", e.cause ?: e
+        )
+      } catch (e: InterruptedException) {
+        Thread.currentThread().interrupt()
+        throw IllegalStateException(
+          "GlStreamInterface.start(): interrupted waiting for GL init.", e
+        )
+      }
     }
   }
 
