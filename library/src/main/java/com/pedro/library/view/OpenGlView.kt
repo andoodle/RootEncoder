@@ -221,6 +221,9 @@ open class OpenGlView : SurfaceView, GlInterface, OnFrameAvailableListener, Surf
     // it must hold a GlStreamInterface rather than the general GlInterface.
     override fun setStreamOverlay(bitmap: android.graphics.Bitmap?) = Unit
 
+    // GPX fork change 8 — same reasoning as setStreamOverlay above, for the record target.
+    override fun setRecordOverlay(bitmap: android.graphics.Bitmap?) = Unit
+
     override fun takePhoto(takePhotoCallback: TakePhotoCallback) {
         this.takePhotoCallback = takePhotoCallback
         this.photoWidth = encoderWidth

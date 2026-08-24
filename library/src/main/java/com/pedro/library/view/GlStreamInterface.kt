@@ -83,6 +83,10 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
   private val mainRender = MainRender()
   // GPX R11 — drawn into the stream encoder surface only, never the record encoder, preview or photo.
   private val streamOverlayRender = StreamOverlayRender()
+  // GPX fork change 8 — the record-target counterpart: drawn into the record encoder surface only,
+  // never the stream encoder, preview or photo. A second independent StreamOverlayRender instance
+  // rather than a new class — that class is already generic, see its own KDoc.
+  private val recordOverlayRender = StreamOverlayRender()
 
   private var encoderWidth = 0
   private var encoderHeight = 0
@@ -187,10 +191,16 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
     Unit
   }
 
-  // GPX R11 — the working implementation of the stream-only overlay plane. OpenGlView's override of
+  // GPX R11 — the working implementation of the stream overlay plane. OpenGlView's override of
   // this is a no-op, so a caller typed to GlInterface loses the overlay silently.
   override fun setStreamOverlay(bitmap: Bitmap?) {
     streamOverlayRender.setBitmap(bitmap)
+  }
+
+  // GPX fork change 8 — the record-target counterpart to setStreamOverlay above. Same no-op-on-
+  // OpenGlView caveat applies.
+  override fun setRecordOverlay(bitmap: Bitmap?) {
+    recordOverlayRender.setBitmap(bitmap)
   }
 
   override fun isRunning(): Boolean = running.get()
@@ -375,6 +385,8 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
     // handles. The
     // next draw on a fresh context re-creates them and re-uploads a still-visible bitmap.
     streamOverlayRender.release()
+    // GPX fork change 8 — same reasoning, for the record-target overlay plane.
+    recordOverlayRender.release()
   }
 
   private fun draw(forced: Boolean, clockTimestamp: Long) {
@@ -422,7 +434,8 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
         mainRender.drawScreenEncoder(w, h, orientation, streamOrientation,
           isStreamVerticalFlip, isStreamHorizontalFlip, streamViewPort)
         // GPX R11 — drawn over the frame content into this surface only. The record encoder branch
-        // renders from the same filtered texture but never sees this.
+        // renders from the same filtered texture but draws its own recordOverlayRender instead
+        // (GPX fork change 8), not this one.
         streamOverlayRender.draw(context)
         surfaceManagerEncoder.setPresentationTime(timestamp)
         surfaceManagerEncoder.swapBuffer()
@@ -435,6 +448,8 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
       if (surfaceManagerEncoderRecord.makeCurrent()) {
         mainRender.drawScreenEncoder(w, h, orientation, streamOrientation,
           isStreamVerticalFlip, isStreamHorizontalFlip, streamViewPort)
+        // GPX fork change 8 — this destination's own overlay plane, independent of streamOverlayRender.
+        recordOverlayRender.draw(context)
         // Fix: same timestamp fix for the dedicated record surface
         surfaceManagerEncoderRecord.setPresentationTime(timestamp)
         surfaceManagerEncoderRecord.swapBuffer()

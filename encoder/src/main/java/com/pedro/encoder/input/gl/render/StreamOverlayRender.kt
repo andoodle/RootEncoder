@@ -31,12 +31,16 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * GPX R11 — a whole file added by the GPX fork; nothing upstream corresponds to it.
  *
- * A full-frame bitmap plane composited into the stream encoder output only.
+ * A full-frame bitmap plane, composited into whichever encoder surface the owning instance draws
+ * to. The filter chain (MainRender.drawFilters) feeds the stream encoder, the record encoder, the
+ * preview and photo captures from one filtered texture; this render draws on top of that, after
+ * the frame content, into the single surface its caller makes current before calling [draw].
  *
- * The filter chain (MainRender.drawFilters) feeds the stream encoder, the record encoder, the
- * preview and photo captures from one filtered texture. This render is drawn by GlStreamInterface
- * into the stream encoder surface alone, after the frame content, so a graphic meant for viewers
- * does not reach the recording file, the preview or a photo capture.
+ * Nothing here is stream- or record-specific. GlStreamInterface owns one instance per
+ * destination it wants an independent overlay on — GPX R11's own streamOverlayRender, drawn into
+ * the stream encoder surface only, and (GPX fork change 8) a second recordOverlayRender, drawn
+ * into the record encoder surface only — each fed by its own [setBitmap] call, so the two
+ * composites can differ.
  *
  * Threading: [setBitmap] is callable from any thread. [draw] and [release] run on the GL thread
  * with the target surface current and the viewport already set by the caller. GL objects are

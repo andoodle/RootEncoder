@@ -229,4 +229,18 @@ public interface GlInterface {
    * @param bitmap overlay image stretched to the full stream frame, or null to remove it.
    */
   void setStreamOverlay(@Nullable Bitmap bitmap);
+
+  /**
+   * GPX fork change 8 — composite a full-frame bitmap into the record encoder output only.
+   *
+   * Mirrors {@link #setStreamOverlay}, but for the record target: this plane reaches the saved
+   * recording file alone, leaving the stream encoder, preview and photo captures untouched. Pass
+   * null to clear.
+   *
+   * Implemented by GlStreamInterface; view-based interfaces have no separate stream and record
+   * branches to split, so they no-op.
+   *
+   * @param bitmap overlay image stretched to the full record frame, or null to remove it.
+   */
+  void setRecordOverlay(@Nullable Bitmap bitmap);
 }
