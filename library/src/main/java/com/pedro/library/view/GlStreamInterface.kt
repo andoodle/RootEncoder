@@ -460,6 +460,12 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
       if (surfaceManagerPhoto.makeCurrent()) {
         mainRender.drawScreen(photoWidth, photoHeight, AspectRatioMode.NONE,
           streamOrientation, isStreamVerticalFlip, isStreamHorizontalFlip, streamViewPort)
+        // GPX fork change 9 — burn the RECORDING-destination overlay composite into the photo
+        // readback too, same call shape as recordOverlayRender.draw(context) above. Without this a
+        // photo taken while a RECORDING-destined overlay item is showing carried no overlay, so a
+        // VOD thumbnail (the app's only photo-capture caller) never matched the recording it was a
+        // thumbnail of.
+        recordOverlayRender.draw(context)
         takePhotoCallback?.onTakePhoto(GlUtil.getBitmap(photoWidth, photoHeight))
         takePhotoCallback = null
         surfaceManagerPhoto.swapBuffer()
