@@ -243,4 +243,22 @@ public interface GlInterface {
    * @param bitmap overlay image stretched to the full record frame, or null to remove it.
    */
   void setRecordOverlay(@Nullable Bitmap bitmap);
+
+  /**
+   * GPX fork change 10 — a local preview liveness signal (gpxstream-app #215).
+   *
+   * Invoked once per GL frame actually drawn into the attached preview target — the same "render
+   * preview" block that composites and swaps the preview surface every draw, independent of
+   * whether a stream or a recording is active. This is a raw liveness signal only: it carries no
+   * timing or frame data, and it is not a substitute for {@link #setStreamOverlay} or
+   * {@link #setRecordOverlay}. A no-op unless a listener is set. Runs on the GL render thread and
+   * must not block; the call is exception-isolated so a listener fault cannot break rendering.
+   * Pass null to clear.
+   *
+   * Implemented by GlStreamInterface; view-based interfaces have no separate preview-draw branch
+   * to observe, so they no-op.
+   *
+   * @param listener called after each preview frame is drawn, or null to remove it.
+   */
+  void setPreviewFrameListener(@Nullable Runnable listener);
 }

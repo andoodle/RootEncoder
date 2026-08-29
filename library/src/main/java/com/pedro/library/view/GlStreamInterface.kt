@@ -24,6 +24,7 @@ import android.graphics.SurfaceTexture.OnFrameAvailableListener
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.util.Log
 import android.view.Surface
 import androidx.annotation.RequiresApi
 import com.pedro.common.TimeUtils
@@ -87,6 +88,10 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
   // never the stream encoder, preview or photo. A second independent StreamOverlayRender instance
   // rather than a new class — that class is already generic, see its own KDoc.
   private val recordOverlayRender = StreamOverlayRender()
+  // GPX fork change 10 — the local preview liveness signal (gpxstream-app #215). Volatile: set from
+  // the caller's thread, read on the GL render thread.
+  @Volatile
+  private var previewFrameListener: Runnable? = null
 
   private var encoderWidth = 0
   private var encoderHeight = 0
@@ -201,6 +206,11 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
   // OpenGlView caveat applies.
   override fun setRecordOverlay(bitmap: Bitmap?) {
     recordOverlayRender.setBitmap(bitmap)
+  }
+
+  // GPX fork change 10 — the preview liveness signal. Same no-op-on-OpenGlView caveat applies.
+  override fun setPreviewFrameListener(listener: Runnable?) {
+    previewFrameListener = listener
   }
 
   override fun isRunning(): Boolean = running.get()
@@ -483,6 +493,14 @@ class GlStreamInterface(private val context: Context): OnFrameAvailableListener,
         mainRender.drawScreenPreview(w, h, orientationPreview, aspectRatioMode, previewOrientation,
           isPreviewVerticalFlip, isPreviewHorizontalFlip, previewViewPort)
         surfaceManagerPreview.swapBuffer()
+        // GPX fork change 10 — the preview liveness signal, fired once this frame's preview draw
+        // actually swapped. Isolated so a listener fault cannot break rendering (same posture as
+        // GPX R32's streamVideoFrameTimingListener).
+        try {
+          previewFrameListener?.run()
+        } catch (e: Exception) {
+          Log.e("GlStreamInterface", "previewFrameListener threw; ignoring", e)
+        }
       }
     }
     // render extra multi-preview surfaces (using independent configuration from PreviewSurfaceInfo)

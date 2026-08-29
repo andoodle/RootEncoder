@@ -117,12 +117,24 @@ unbroken ordinary paths, not the races. `gpxstream-app`'s pin is `2.8.0-gpx3`.
 merge of upstream `pedro/master` @ `300d99fe1` (surface-PTS rebase onto the shared start, the
 GL timestamp rework, a timestamp-based fps limiter — all on the live video path, so the next
 consumer pin move wants a bench watch for A/V sync and frame pacing), R32, the encoded-frame
-timing seam ported from `teaky-frame-timing` (inert until a listener is set), and R33, the
+timing seam ported from `teaky-frame-timing` (inert until a listener is set), R33, the
 swappable network-transport seam (`library/src/main/java/com/pedro/library/transport/`:
 `StreamTransport`, `GenericTransport`, `WhipTransport`, `SwitchableStream`, `TransportPrimer`) —
-consumer issue #110, so a protocol change no longer forces a full rebuild of the recording path.
-Zero edits to `StreamBase.kt`. `gradlew assembleDebug test` passes across every module and the
-sample app with R33 in the tree. A consumer pin move onto this head therefore also promotes the
-27 previously-unbenched R31/R32 commits at the same time, so the next bench gate consciously
-widens to cover R31/R32's A/V-sync and frame-pacing watch items alongside R33's live protocol
-swaps.
+consumer issue #110, so a protocol change no longer forces a full rebuild of the recording path —
+and R34, a synchronized GL-init wait in `GlStreamInterface.start()` (consumer issue #108) so a
+timeout or exception there throws instead of being silently swallowed. Three further,
+non-upstream-numbered fork changes ride the same head: fork change 8, `setRecordOverlay` — a
+second `StreamOverlayRender` instance drawn into the record encoder target only, giving the
+stream and the recording independent overlay composites; fork change 9, burning that same
+record-target overlay into photo captures too, so a VOD thumbnail always matches the recording it
+is a thumbnail of; and fork change 10, `GlInterface.setPreviewFrameListener` (consumer issue
+#215) — a no-op-unless-set, exception-isolated callback fired once per GL frame actually drawn
+into the attached preview target, independent of streaming/recording state, so the consumer can
+build a local-preview liveness watchdog without a second listener on the camera's own
+`SurfaceTexture` (which the fork already claims exclusively for its own render loop). Zero edits
+to `StreamBase.kt` from any of R33/R34/fork change 8/9/10. `gradlew assembleDebug test` passes across
+every module and the sample app with all of the above in the tree. A consumer pin move onto this
+head therefore also promotes the 27 previously-unbenched R31/R32 commits at the same time, so the
+next bench gate consciously widens to cover R31/R32's A/V-sync and frame-pacing watch items
+alongside R33's live protocol swaps, R34's preview-attach fix, and fork change 8/9/10's own
+composite/liveness behavior.
