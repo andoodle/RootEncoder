@@ -85,6 +85,18 @@ legible without running it.
   (F2), build placement in its implementation plan (WP9).
 - **Never reuse or move a published tag.** JitPack caches builds per tag; a moved tag serves
   stale or mismatched artifacts.
+- **JitPack's install command excludes `:app:assemble`** (`jitpack.yml`). JitPack's default
+  Android build runs root-level `assemble`/`publishToMavenLocal`, which builds every module in
+  `settings.gradle` including the sample `:app` module — the only one with no `maven-publish`
+  plugin and nothing JitPack ever serves to a consumer. Building it anyway forces
+  `:app:mergeDexDebug` to dex the demo app's full dependency graph (CameraX, media3-exoplayer,
+  UVCAndroid, ktor, BouncyCastle), which reliably exhausts JitPack's build-container disk quota
+  (D8 fails with `java.io.IOException: No space left on device` — easy to misread as a
+  BouncyCastle/D8 incompatibility from the build log's summary line alone). Root-caused and
+  fixed 2026-09-02: a prior check of this had wrongly concluded "no fix needed" because it
+  tested JitPack against the *short* commit hash, which JitPack treats as an entirely separate
+  cached build from the full 40-character SHA gpxstream-app actually pins — always verify
+  against the full SHA.
 - **The next upstream sync** fast-forwards `master`, then branches or rebases the GPX line off
   it. The procedure and the item-by-item record from the 2.7.5 to 2.8.0 move are in
   `.claude/gpx-reapply-plan-2.8.0.md`.

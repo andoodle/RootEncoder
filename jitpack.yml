@@ -1,2 +1,15 @@
 jdk:
   - openjdk21
+# JitPack's default Android/Gradle build runs root-level `assemble` and `publishToMavenLocal`,
+# which (per Gradle's multi-project task resolution) invokes `assemble` in every subproject
+# named in settings.gradle, including the sample `:app` module. `:app` has no maven-publish
+# plugin and is never part of what JitPack serves to consumers (only `:common`, `:encoder`,
+# `:extra-sources`, `:library`, `:rtmp`, `:rtsp`, `:srt`, `:udp` and `:whip` publish anything),
+# but building it still forces `:app:mergeDexDebug` to dex its full demo dependency graph
+# (CameraX, media3-exoplayer, UVCAndroid, ktor, BouncyCastle, ...). That dexing step
+# consistently blows JitPack's build-container disk quota (D8 fails with
+# `java.io.IOException: No space left on device`), which looks like a BouncyCastle/D8
+# incompatibility in the build log but isn't one. Excluding `:app:assemble` skips that dexing
+# entirely; every module a consumer actually resolves still builds and publishes normally.
+install:
+  - ./gradlew clean -Pgroup=$GROUP -Pversion=$VERSION -xtest -xlint assemble publishToMavenLocal -x :app:assemble
