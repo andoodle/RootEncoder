@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<!-- CANONICAL CONTENT FOR AI: the complete recap (+ AI notes) is the raw-markdown
+     block below, kept FIRST on purpose. Read just this block (Read with a line limit)
+     to get the whole recap cheaply. Source of truth; the styled body is a human VIEW. -->
+<script type="text/markdown" id="recap">
+# JitPack investigation for gpx-2.8 @ 054e96fdb — 2026-09-02
+
+**Outcome: no repo-side fix needed.** A fresh JitPack build for commit `054e96fdb` (current
+`gpx-2.8` head) completed successfully and served all 9 modules. A live Gradle resolution
+against `com.github.andoodle.RootEncoder:library:054e96fdb` from the `jitpack.io` repo pulled
+every sibling module (`encoder`, `rtmp`, `rtsp`, `srt`, `udp`, `whip`, `common`) with no errors.
+No commits made; the repo is unchanged.
+
+## What was checked
+
+- **`jitpack.yml`** (`jdk: openjdk21`) and **`app/build.gradle.kts`**'s `multiDexEnabled = true`
+  were both suspected causes going in. `git log` on both shows they are long-standing upstream
+  `pedroSG94` commits (`fb373cd83`, 2026-07-20 for the JDK line; `multiDexEnabled` has been set
+  since at least the `kdsl` migration) — not something added to fix this issue, and not changed
+  this session.
+- Triggered a real JitPack build by requesting
+  `https://jitpack.io/com/github/andoodle/RootEncoder/054e96fdb/build.log` — JitPack runs
+  `./gradlew clean -Pgroup=com.github.andoodle -Pversion=054e96fdb -xtest -xlint assemble publishToMavenLocal`,
+  which does build the sample `:app` module as part of the default `assemble` task graph (confirms
+  that part of the original theory). The build ran under JDK 21.0.2 (sdkman-installed), Gradle
+  9.6.1, and finished **BUILD SUCCESSFUL in 1m 16s**, publishing all 9 modules
+  (`common`, `encoder`, `extra-sources`, `library`, `rtmp`, `rtsp`, `srt`, `udp`, `whip`) —
+  including a clean `:app:assembleDebug`/`:app:assembleRelease` with no BouncyCastle/dex error at
+  any point in the log.
+- Confirmed every module's POM is servable now: `curl` against all 9
+  `.../<module>/054e96fdb/<module>-054e96fdb.pom` URLs returned `200`.
+- Read `library`'s published POM: its sibling dependencies (`encoder`, `rtmp`, `rtsp`, `srt`,
+  `udp`, `whip`, `common`) are all declared at matching `groupId`
+  (`com.github.andoodle.RootEncoder`) and matching `version` (`054e96fdb`) — a consistent,
+  resolvable graph.
+- Built a throwaway Gradle project (this fork's own `gradlew`/wrapper, JDK 17 locally) declaring
+  `com.github.andoodle.RootEncoder:library:054e96fdb` against `google()` + `mavenCentral()` +
+  `jitpack.io`, and ran `--refresh-dependencies` to bypass any stale negative cache. Result: every
+  `.aar` (library, encoder, rtmp, rtsp, srt, udp, whip, common) plus all transitive jars resolved
+  and downloaded cleanly. This is the same resolution shape `gpxstream-app` would do.
+
+## Working theory for the originally-reported failure
+
+Not confirmed, offered as the most consistent explanation: JitPack builds a commit on first
+request and the build takes over a minute; a consumer's very first resolution attempt for a
+not-yet-built SHA can race that window and get inconsistent results per-artifact (the reported
+"library's own artifact publishes, siblings don't" shape matches this exactly — `library`'s POM
+may already be visible in JitPack's own artifact index before the full multi-module publish step
+finishes for the rest). Once a build for a given SHA completes, JitPack caches it, and this
+session's fresh trigger + full resolution test both went green with no code involved. This is
+JitPack's known on-demand-build behavior, not a defect in this repo's Gradle/JDK/BouncyCastle
+setup.
+
+## What this does NOT establish
+
+This was one build, triggered once, verified once. It does not rule out a flakier or
+environment-specific failure that didn't recur today, and it says nothing about whether the
+*previous* pinned commit (`6a053ff56`, one commit behind head) has ever built cleanly on JitPack —
+that wasn't re-tested.
+
+## Open items (for the gpxstream-app side, not this repo)
+
+- Whether/when to move the `gpxstream-app` pin from `6a053ff56` to `054e96fdb` is Andy's call in
+  that repo — not done here, per the task's explicit instruction.
+- If `gpxstream-app`'s build still fails to resolve `054e96fdb` after this, the fix is almost
+  certainly `--refresh-dependencies` on their end (to drop a cached negative resolution from an
+  earlier failed attempt), not a change here.
+
+## AI notes (scratch — optional, written by Claude for future sessions)
+Verification artifacts: the throwaway resolution test project lived at
+`/private/tmp/.../scratchpad/jitpack-verify` (session scratchpad, not in this repo) and its Gradle
+daemon was stopped after use. Nothing under `/Users/andy/Desktop/Development/RootEncoder` changed.
+</script>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>JitPack Verify 054e96fdb — 2026-09-02 20:18</title>
+<style>
+  :root{--red-500:#EF3340;--red-700:#B3242B;--red-50:#FDECEC;--paper:#FAF8F5;--card:#FFFFFF;
+    --border:#DDD7CF;--border-subtle:#ECE7E0;--fg-1:#181512;--fg-2:#3D3833;--fg-3:#6B645C;
+    --ok:#12B76A;--attn:#F79009;--chip:#F1ECE5;
+    --font-display:"Barlow Condensed","Oswald","Segoe UI Semibold",system-ui,sans-serif;
+    --font-mono:"Roboto Mono",ui-monospace,"Cascadia Code",Consolas,Menlo,monospace;
+    --radius-md:4px;--radius-lg:8px;--shadow:0 1px 2px rgba(11,9,8,.06),0 4px 8px -2px rgba(11,9,8,.06);--maxw:880px;}
+  *{box-sizing:border-box;}html,body{margin:0;padding:0;}
+  body{background:var(--paper);color:var(--fg-2);font-family:var(--font-mono);font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 28px 72px;}
+  .topbar{max-width:var(--maxw);margin:0 auto;padding:26px 28px 0;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;}
+  .logo{display:inline-flex;align-items:center;gap:9px;}
+  .logo .flag{background:var(--red-500);color:#fff;font-family:var(--font-display);font-weight:800;font-size:17px;padding:3px 7px 2px;border-radius:2px;line-height:1;}
+  .logo .word{font-family:var(--font-display);font-weight:700;font-size:17px;letter-spacing:.14em;text-transform:uppercase;color:var(--fg-1);}
+  .doc-meta{font-size:11px;letter-spacing:.13em;text-transform:uppercase;color:var(--fg-3);text-align:right;}
+  .doc-meta .tag{color:var(--red-700);font-weight:700;}
+  .topdivide{max-width:var(--maxw);margin:16px auto 0;padding:0 28px;}.topdivide hr{border:0;border-top:2px solid var(--red-500);margin:0;}
+  .hero{padding:38px 0 4px;}
+  .eyebrow{font-size:11px;font-weight:700;letter-spacing:.26em;text-transform:uppercase;color:var(--red-700);margin:0 0 12px;}
+  h1{font-family:var(--font-display);font-weight:800;font-size:44px;line-height:1.03;text-transform:uppercase;color:var(--fg-1);margin:0 0 14px;}
+  .standfirst{font-size:16px;color:var(--fg-2);max-width:64ch;margin:0;}
+  .stats{display:flex;flex-wrap:wrap;gap:10px;margin-top:22px;}
+  .stat{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-md);padding:9px 15px;box-shadow:var(--shadow);}
+  .stat b{font-family:var(--font-display);font-weight:700;font-size:22px;color:var(--fg-1);display:block;line-height:1;margin-bottom:3px;}
+  .stat span{font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:var(--fg-3);}
+  details{padding-top:34px;border:0;}details+details{border-top:1px solid var(--border-subtle);}
+  summary{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;cursor:pointer;list-style:none;padding-top:6px;}
+  summary::-webkit-details-marker{display:none;}summary .htext{flex:1;}
+  summary .chev{font-family:var(--font-mono);font-weight:700;font-size:20px;line-height:1;color:var(--red-500);margin-top:16px;transition:transform .18s ease;user-select:none;}
+  details[open] summary .chev{transform:rotate(90deg);}summary:hover h2{color:var(--red-700);}
+  .count{font-family:var(--font-mono);font-size:12px;font-weight:700;color:var(--red-700);background:var(--red-50);border-radius:20px;padding:2px 9px;margin-left:10px;vertical-align:middle;}
+  .secbody{padding-top:14px;}
+  .sec-eyebrow{font-size:11px;font-weight:700;letter-spacing:.22em;text-transform:uppercase;color:var(--red-700);margin:0 0 8px;display:flex;align-items:center;gap:10px;}
+  .sec-eyebrow::before{content:"";width:18px;height:2px;background:var(--red-500);display:inline-block;}
+  h2{font-family:var(--font-display);font-weight:700;font-size:27px;line-height:1.1;text-transform:uppercase;color:var(--fg-1);margin:0;transition:color .12s;}
+  h3{font-family:var(--font-mono);font-weight:700;font-size:13.5px;color:var(--fg-1);margin:0 0 6px;}
+  p{margin:0 0 12px;}p:last-child{margin-bottom:0;}strong{color:var(--fg-1);font-weight:700;}
+  code{font-family:var(--font-mono);background:var(--chip);padding:.1em .4em;border-radius:3px;font-size:.86em;color:var(--fg-1);}
+  .cards{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:18px 20px;box-shadow:var(--shadow);}
+  .card .tag{display:inline-flex;align-items:center;gap:8px;font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px;}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block;}.dot.ok{background:var(--ok);}.dot.attn{background:var(--attn);}
+  .card p{font-size:13.5px;margin:0;}
+  ul.clean{list-style:none;margin:0;padding:0;display:grid;gap:8px;}
+  ul.clean li{position:relative;padding-left:24px;font-size:13.5px;color:var(--fg-2);}
+  ul.clean li::before{content:"";position:absolute;left:3px;top:8px;width:7px;height:7px;background:var(--red-500);border-radius:1px;transform:rotate(45deg);}
+  ul.clean li strong{color:var(--fg-1);}
+  .check{list-style:none;margin:0;padding:0;display:grid;gap:11px;}
+  .check li{position:relative;padding-left:28px;font-size:13.5px;color:var(--fg-2);}
+  .check li::before{content:"";position:absolute;left:0;top:2px;width:15px;height:15px;border:2px solid var(--attn);border-radius:3px;}
+  .check li strong{color:var(--fg-1);}
+  pre{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:13px 16px;overflow-x:auto;font-size:12px;line-height:1.5;color:var(--fg-2);box-shadow:var(--shadow);margin:0 0 6px;}
+  pre code{background:none;padding:0;color:var(--fg-2);}
+  .raw pre{max-height:520px;overflow:auto;font-size:11.5px;white-space:pre-wrap;word-break:break-word;}
+  .raw .hint{font-size:11px;color:var(--fg-3);margin:0 0 8px;}
+  footer{max-width:var(--maxw);margin:48px auto 0;padding:20px 28px 36px;border-top:1px solid var(--border);display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--fg-3);}
+  .controls{max-width:var(--maxw);margin:18px auto 0;padding:0 28px;text-align:right;}
+  .controls button{font-family:var(--font-mono);font-size:10.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--fg-3);background:none;border:1px solid var(--border);border-radius:20px;padding:5px 12px;cursor:pointer;}
+  .controls button:hover{color:var(--red-700);border-color:var(--red-500);}
+  @media (max-width:640px){h1{font-size:32px;}h2{font-size:23px;}.cards{grid-template-columns:1fr;}}
+  @media print{:root{--paper:#fff;}body{background:#fff;font-size:11pt;}.card,.stat,pre{box-shadow:none;}
+    .controls,summary .chev{display:none;}details>.secbody{display:block!important;}
+    details,.card,.stat{page-break-inside:avoid;}*{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <span class="logo"><span class="flag">GPX</span><span class="word">Stream</span></span>
+    <span class="doc-meta"><span class="tag">Session Recap · Internal</span><br />RootEncoder fork · 2026-09-02</span>
+  </div>
+  <div class="topdivide"><hr /></div>
+  <div class="wrap">
+    <div class="hero">
+      <p class="eyebrow">Session Recap · 2026-09-02 20:18</p>
+      <h1>JitPack Investigation — 054e96fdb</h1>
+      <p class="standfirst">Investigated a reported JitPack failure blocking gpxstream-app's pin move to the current gpx-2.8 head. A fresh triggered build and a live Gradle resolution both went green — no repo change was needed or made.</p>
+      <div class="stats">
+        <div class="stat"><b>Green</b><span>Fresh JitPack build</span></div>
+        <div class="stat"><b>9 / 9</b><span>Modules resolved</span></div>
+        <div class="stat"><b>0</b><span>Commits made</span></div>
+        <div class="stat"><b>1m 16s</b><span>Build time</span></div>
+      </div>
+    </div>
+    <div class="controls">
+      <button type="button" onclick="document.querySelectorAll('details').forEach(d=>d.open=true)">Expand all</button>
+      <button type="button" onclick="document.querySelectorAll('details').forEach(d=>d.open=false)">Collapse all</button>
+    </div>
+
+    <details open>
+      <summary><span class="htext"><span class="sec-eyebrow">Status</span><h2>Outcome</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody cards">
+        <div class="card"><span class="tag"><span class="dot ok"></span>Build: green</span>
+          <p>Triggering <code>https://jitpack.io/.../054e96fdb/build.log</code> ran a fresh build under JDK 21.0.2 / Gradle 9.6.1. <code>BUILD SUCCESSFUL in 1m 16s</code>, all 9 modules published, <code>:app</code> assembled with no BouncyCastle/dex error.</p></div>
+        <div class="card"><span class="tag"><span class="dot ok"></span>Resolution: green</span>
+          <p>A throwaway Gradle project resolving <code>com.github.andoodle.RootEncoder:library:054e96fdb</code> from <code>jitpack.io</code> with <code>--refresh-dependencies</code> pulled every sibling module's <code>.aar</code> cleanly.</p></div>
+      </div>
+    </details>
+
+    <details open>
+      <summary><span class="htext"><span class="sec-eyebrow">Findings</span><h2>What Was Checked</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <ul class="clean">
+          <li><strong>jitpack.yml / multiDexEnabled</strong> — both are long-standing upstream <code>pedroSG94</code> commits, not fork edits, and unchanged this session.</li>
+          <li><strong>Build command confirmed</strong> — JitPack runs <code>assemble</code> (builds <code>:app</code>) then <code>publishToMavenLocal</code> for every module in one pass.</li>
+          <li><strong>All 9 POMs</strong> return <code>200</code>; <code>library</code>'s POM declares every sibling at matching group + version.</li>
+          <li><strong>Live resolution test</strong> — this fork's own <code>gradlew</code>, JDK 17 locally, <code>google()</code> + <code>mavenCentral()</code> + <code>jitpack.io</code>, full artifact set downloaded.</li>
+        </ul>
+      </div>
+    </details>
+
+    <details>
+      <summary><span class="htext"><span class="sec-eyebrow">Theory</span><h2>Likely Explanation</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <p>Not confirmed — offered as the most consistent read: JitPack builds a commit on first request, taking over a minute. A consumer's very first resolution attempt for a not-yet-built SHA can race that window and see <code>library</code> resolve while siblings still 404 — exactly the reported symptom. Once a SHA's build completes, JitPack caches it; this session's fresh trigger and full resolution test both went green afterward.</p>
+      </div>
+    </details>
+
+    <details>
+      <summary><span class="htext"><span class="sec-eyebrow">Next</span><h2>Open Items<span class="count">2</span></h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <ul class="check">
+          <li><strong>Pin move is Andy's call, in gpxstream-app</strong> — not done from here, per instruction.</li>
+          <li><strong>If gpxstream-app still fails to resolve 054e96fdb</strong>, try <code>--refresh-dependencies</code> there first — likely a cached negative resolution from an earlier attempt, not a repo-side issue.</li>
+        </ul>
+      </div>
+    </details>
+
+    <details class="raw">
+      <summary><span class="htext"><span class="sec-eyebrow">For the record</span><h2>Full Record + AI Notes</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <p class="hint">Complete raw recap + Claude's scratch notes — the same canonical block the AI reads from the top of this file.</p>
+        <pre id="fullmd"></pre>
+      </div>
+    </details>
+  </div>
+  <footer><span>GPX Stream · Session Recap · 2026-09-02 20:18</span><span>Internal — RootEncoder fork</span></footer>
+  <script>document.getElementById('fullmd').textContent=document.getElementById('recap').textContent.trim();</script>
+</body>
+</html>
