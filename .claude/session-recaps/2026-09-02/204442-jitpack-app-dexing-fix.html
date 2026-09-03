@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<script type="text/markdown" id="recap">
+# JitPack build fix — sample :app dexing exhausted disk, not a BouncyCastle bug
+
+## Outcome
+
+Fixed. `jitpack.yml` now excludes `:app:assemble` from JitPack's install command. Verified
+against the fix commit's full 40-character SHA on real JitPack infrastructure:
+`BUILD SUCCESSFUL in 2m 9s`, all 9 consumer-facing modules published under
+`com.github.andoodle:RootEncoder:2e2ff42eeda43c87d0ee0b229380694091810f64`, and `:app:clean
+UP-TO-DATE` is the only `:app` task line in the whole log (no dexing, no mergeDex, nothing else).
+
+Fix commit: `2e2ff42eeda43c87d0ee0b229380694091810f64` on `gpx-2.8` (pushed, main checkout
+fast-forwarded).
+
+## Background — what I was asked to check
+
+A prior chip had concluded "JitPack builds fine, no fix needed" but tested only the *short*
+commit hash `054e96fdb`. JitPack caches builds per exact version string, so a short hash and the
+full 40-character SHA of the same commit are two entirely separate cached builds. The
+orchestrator re-tested against the actual full SHA gpxstream-app pins
+(`054e96fdbcd20e396a5e7bf8547f1c71da28c510`) and got a real, reproducible failure at
+`:app:mergeDexDebug` with BouncyCastle's `bcpkix-jdk15to18-1.84.jar` named in the summary line —
+which looked like it could be a BouncyCastle/D8 dexing incompatibility, or a `minSdk=16`
+interaction. I was asked to read the complete build log (not just the tail), root-cause it for
+real, and fix it — including considering whether JitPack even needs to build the sample `:app`
+module at all.
+
+## Root cause
+
+Downloaded the complete build log (14,895 lines,
+`https://jitpack.io/com/github/andoodle/RootEncoder/054e96fdbcd20e396a5e7bf8547f1c71da28c510/build.log`)
+instead of just the tail. The actual D8 error, buried well past the "Error while dexing" summary
+line the orchestrator had seen, was:
+
+```
+ERROR: .../bcpkix-jdk15to18-1.84/bcpkix-jdk15to18-1.84_dex/classes.dex: D8: java.io.IOException: No space left on device
+```
+
+**Not a BouncyCastle/D8 incompatibility. Not a minSdk interaction. Disk space exhaustion on
+JitPack's build container.**
+
+Why it happens: JitPack's default Android/Gradle build runs root-level `assemble` and
+`publishToMavenLocal`. Gradle resolves an unqualified task name from the root by running it in
+*every* subproject that defines one — so `assemble` builds all 10 modules in `settings.gradle`,
+including the sample `:app` module, even though `:app` has no `maven-publish` plugin and
+publishes nothing (confirmed: the log's "Publication:" lines list exactly the 9 other modules,
+never `:app`). Building `:app` anyway means dexing its full demo dependency graph — CameraX,
+media3-exoplayer, UVCAndroid, ktor, BouncyCastle, even `cn.hutool` — as a real APK with
+`minSdk=16` and multidex. With JitPack's build cache disabled (`Caching disabled: Build cache is
+disabled` on every single transform), every one of those dependencies gets dexed fresh into the
+container's local disk on every build, and that consistently exceeds the container's disk quota.
+This is deterministic given the current dependency footprint, not a transient one-off "disk
+full" blip — it will keep failing on every future full-SHA build until something changes what
+gets built.
+
+## Fix
+
+`:app` was never part of what a consumer resolves. The correct fix is to stop JitPack from
+building it at all, not to shrink or version-bump anything in the sample app's real dependency
+graph (which would be a much larger, riskier change for zero consumer benefit, and isn't even a
+GPX decision to make unilaterally — that dependency graph traces back to upstream's own sample
+app choices).
+
+`jitpack.yml`, before:
+```yaml
+jdk:
+  - openjdk21
+```
+
+`jitpack.yml`, after: same JDK line, plus an `install:` override that reproduces JitPack's
+default command exactly but adds `-x :app:assemble`:
+```yaml
+install:
+  - ./gradlew clean -Pgroup=$GROUP -Pversion=$VERSION -xtest -xlint assemble publishToMavenLocal -x :app:assemble
+```
+
+`$GROUP`/`$VERSION` are JitPack's own documented per-build environment variables (confirmed via
+`docs.jitpack.io/building/` — the docs page enumerates exactly these two, plus `$ARTIFACT`).
+Excluding `:app:assemble` cascades to exclude everything only `:app:assemble` needs — both debug
+and release variants, and `:app:mergeDexDebug`/`mergeDexRelease` with them — since nothing else
+in the graph depends on `:app`'s outputs.
+
+Also added a short paragraph to `.claude/gpx-branch-policy.md`'s Rules section documenting this
+(the "verify against the full SHA, not a short hash" lesson belongs where the next person will
+actually look for JitPack gotchas).
+
+## Verification
+
+**Local, before pushing:** ran the modified install command in an isolated worktree
+(`.claude/worktrees/jitpack-app-exclude`, detached at `origin/gpx-2.8`) under the local JDK17
+toolchain with fake `-Pgroup`/`-Pversion` values. `BUILD SUCCESSFUL`, 497 actionable tasks (down
+from 526 in the failing build — the `:app` subtree dropped out), `grep -n "^> Task :app:"` showed
+only `:app:clean UP-TO-DATE`, `grep -n mergeDex` showed nothing at all, and all 9
+`publishToMavenLocal` tasks (`common`, `encoder`, `extra-sources`, `library`, `rtmp`, `rtsp`,
+`srt`, `udp`, `whip`) ran and landed artifacts in `~/.m2/repository`.
+
+**Real JitPack, after pushing:** committed, pushed to `origin/gpx-2.8` (fast-forward,
+`7a5752425..2e2ff42ee`), then triggered a fresh JitPack build against the fix commit's actual
+full 40-character SHA — `2e2ff42eeda43c87d0ee0b229380694091810f64`, not a short hash, per the
+exact mistake this task exists to not repeat. Result: `BUILD SUCCESSFUL in 2m 9s`. The only
+`:app` line anywhere in the log is `> Task :app:clean UP-TO-DATE`. No `mergeDex`, no `FAILURE`,
+no disk-space error. The log's file listing shows all 9 modules published under
+`com/github/andoodle/RootEncoder/<module>/2e2ff42eeda43c87d0ee0b229380694091810f64/` with `.aar`,
+`.module`, `.pom` and checksums for each — exactly the coordinate shape gpxstream-app's
+`rootEncoderVersion` pin would resolve.
+
+Full log saved locally at
+`/private/tmp/claude-501/-Users-andy-Desktop-Development-RootEncoder/991ea910-9652-457a-8a37-b3cd9e6ac5a7/scratchpad/jitpack-fix-build.log`
+(session-scratch path, not part of the repo).
+
+## An unrelated thing noticed but deliberately not touched
+
+Every module publishes internally as `com.github.pedroSG94:<module>:2.8.0` — `-Pgroup`/`-Pversion`
+project properties aren't actually consumed anywhere in the build scripts (`groupId =
+project.group.toString()` reads the root project's hardcoded `group`, not the Gradle property).
+This is pre-existing and orthogonal: JitPack's server remaps whatever lands in `~/.m2` to its own
+`com.github.<owner>:<repo>:<tag-or-sha>` virtual coordinates regardless of the internal groupId,
+and the real full-SHA build above proves this remap works correctly end to end (the file listing
+shows the `com/github/andoodle/RootEncoder/...` paths). Confirmed harmless, out of scope for this
+task, not changed.
+
+## What NOT done (per task scope)
+
+Did not move gpxstream-app's dependency pin — that's Andy's call, in the other repo, once he's
+seen this. Did not touch `gpx-master` or the `2.7.5-gpx*` tag line. Did not modify any BouncyCastle
+version, `minSdk`, or sample-app dependency — none of those were the actual root cause.
+
+## AI notes (scratch — optional, written by Claude for future sessions)
+
+The single biggest time-saver here was reading the *entire* build log instead of trusting the
+tail. The orchestrator's own tail-read summary ("Error while dexing") looked exactly like a
+plausible BouncyCastle/D8 incompatibility, and it would have been easy to go straight to "try a
+newer BouncyCastle artifact" or "bump minSdk" without ever seeing the actual `IOException: No
+space left on device` two screens further down. When a build log's summary exception looks
+suspicious but generic, grep for `ERROR:`/`Caused by:`/stack-trace-shaped lines across the *whole*
+file before hypothesizing a root cause — the worker-process stack trace with the real exception
+type can print well after the "Task X FAILED" line due to output buffering from forked dexing
+workers.
+
+Also worth remembering for next time: JitPack's own docs (`docs.jitpack.io`) return the real
+content behind `docs.jitpack.io/building/` and `/android/` fine via a plain `curl` with a browser
+User-Agent — the WebFetch tool got a 403 on the same URL. If a doc site 403s WebFetch, try a
+direct `curl -A "<browser-UA>"` before assuming the content is unreachable.
+</script>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>JitPack App Dexing Fix — 2026-09-02 2044</title>
+<style>
+  :root{--red-500:#EF3340;--red-700:#B3242B;--red-50:#FDECEC;--paper:#FAF8F5;--card:#FFFFFF;
+    --border:#DDD7CF;--border-subtle:#ECE7E0;--fg-1:#181512;--fg-2:#3D3833;--fg-3:#6B645C;
+    --ok:#12B76A;--attn:#F79009;--chip:#F1ECE5;
+    --font-display:"Barlow Condensed","Oswald","Segoe UI Semibold",system-ui,sans-serif;
+    --font-mono:"Roboto Mono",ui-monospace,"Cascadia Code",Consolas,Menlo,monospace;
+    --radius-md:4px;--radius-lg:8px;--shadow:0 1px 2px rgba(11,9,8,.06),0 4px 8px -2px rgba(11,9,8,.06);--maxw:880px;}
+  *{box-sizing:border-box;}html,body{margin:0;padding:0;}
+  body{background:var(--paper);color:var(--fg-2);font-family:var(--font-mono);font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 28px 72px;}
+  .topbar{max-width:var(--maxw);margin:0 auto;padding:26px 28px 0;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;}
+  .logo{display:inline-flex;align-items:center;gap:9px;}
+  .logo .flag{background:var(--red-500);color:#fff;font-family:var(--font-display);font-weight:800;font-size:17px;padding:3px 7px 2px;border-radius:2px;line-height:1;}
+  .logo .word{font-family:var(--font-display);font-weight:700;font-size:17px;letter-spacing:.14em;text-transform:uppercase;color:var(--fg-1);}
+  .doc-meta{font-size:11px;letter-spacing:.13em;text-transform:uppercase;color:var(--fg-3);text-align:right;}
+  .doc-meta .tag{color:var(--red-700);font-weight:700;}
+  .topdivide{max-width:var(--maxw);margin:16px auto 0;padding:0 28px;}.topdivide hr{border:0;border-top:2px solid var(--red-500);margin:0;}
+  .hero{padding:38px 0 4px;}
+  .eyebrow{font-size:11px;font-weight:700;letter-spacing:.26em;text-transform:uppercase;color:var(--red-700);margin:0 0 12px;}
+  h1{font-family:var(--font-display);font-weight:800;font-size:40px;line-height:1.05;text-transform:uppercase;color:var(--fg-1);margin:0 0 14px;}
+  .standfirst{font-size:16px;color:var(--fg-2);max-width:64ch;margin:0;}
+  .stats{display:flex;flex-wrap:wrap;gap:10px;margin-top:22px;}
+  .stat{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-md);padding:9px 15px;box-shadow:var(--shadow);}
+  .stat b{font-family:var(--font-display);font-weight:700;font-size:22px;color:var(--fg-1);display:block;line-height:1;margin-bottom:3px;}
+  .stat span{font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:var(--fg-3);}
+  details{padding-top:34px;border:0;}details+details{border-top:1px solid var(--border-subtle);}
+  summary{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;cursor:pointer;list-style:none;padding-top:6px;}
+  summary::-webkit-details-marker{display:none;}summary .htext{flex:1;}
+  summary .chev{font-family:var(--font-mono);font-weight:700;font-size:20px;line-height:1;color:var(--red-500);margin-top:16px;transition:transform .18s ease;user-select:none;}
+  details[open] summary .chev{transform:rotate(90deg);}summary:hover h2{color:var(--red-700);}
+  .count{font-family:var(--font-mono);font-size:12px;font-weight:700;color:var(--red-700);background:var(--red-50);border-radius:20px;padding:2px 9px;margin-left:10px;vertical-align:middle;}
+  .secbody{padding-top:14px;}
+  .sec-eyebrow{font-size:11px;font-weight:700;letter-spacing:.22em;text-transform:uppercase;color:var(--red-700);margin:0 0 8px;display:flex;align-items:center;gap:10px;}
+  .sec-eyebrow::before{content:"";width:18px;height:2px;background:var(--red-500);display:inline-block;}
+  h2{font-family:var(--font-display);font-weight:700;font-size:27px;line-height:1.1;text-transform:uppercase;color:var(--fg-1);margin:0;transition:color .12s;}
+  h3{font-family:var(--font-mono);font-weight:700;font-size:13.5px;color:var(--fg-1);margin:0 0 6px;}
+  p{margin:0 0 12px;}p:last-child{margin-bottom:0;}strong{color:var(--fg-1);font-weight:700;}
+  code{font-family:var(--font-mono);background:var(--chip);padding:.1em .4em;border-radius:3px;font-size:.86em;color:var(--fg-1);}
+  .cards{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:18px 20px;box-shadow:var(--shadow);}
+  .card .tag{display:inline-flex;align-items:center;gap:8px;font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;margin-bottom:10px;}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block;}.dot.ok{background:var(--ok);}.dot.attn{background:var(--attn);}
+  .card p{font-size:13.5px;margin:0;}
+  ul.clean{list-style:none;margin:0;padding:0;display:grid;gap:8px;}
+  ul.clean li{position:relative;padding-left:24px;font-size:13.5px;color:var(--fg-2);}
+  ul.clean li::before{content:"";position:absolute;left:3px;top:8px;width:7px;height:7px;background:var(--red-500);border-radius:1px;transform:rotate(45deg);}
+  ul.clean li strong{color:var(--fg-1);}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  .nugget{background:var(--card);border:1px solid var(--border);border-left:3px solid var(--red-500);border-radius:var(--radius-md);padding:13px 16px;box-shadow:var(--shadow);}
+  .nugget h3{margin-bottom:5px;}.nugget p{font-size:12.5px;color:var(--fg-2);margin:0;}
+  pre{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:13px 16px;overflow-x:auto;font-size:12px;line-height:1.5;color:var(--fg-2);box-shadow:var(--shadow);margin:0 0 6px;}
+  pre code{background:none;padding:0;color:var(--fg-2);}
+  .resume .secbody{background:var(--fg-1);color:#EDE9E3;border-radius:var(--radius-lg);padding:20px 24px;margin-top:14px;}
+  .resume pre{background:#231e1a;border:1px solid #3a332d;color:#D9D2CA;font-size:12.5px;box-shadow:none;margin:0;}
+  .raw pre{max-height:520px;overflow:auto;font-size:11.5px;white-space:pre-wrap;word-break:break-word;}
+  .raw .hint{font-size:11px;color:var(--fg-3);margin:0 0 8px;}
+  footer{max-width:var(--maxw);margin:48px auto 0;padding:20px 28px 36px;border-top:1px solid var(--border);display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--fg-3);}
+  .controls{max-width:var(--maxw);margin:18px auto 0;padding:0 28px;text-align:right;}
+  .controls button{font-family:var(--font-mono);font-size:10.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--fg-3);background:none;border:1px solid var(--border);border-radius:20px;padding:5px 12px;cursor:pointer;}
+  .controls button:hover{color:var(--red-700);border-color:var(--red-500);}
+  @media (max-width:640px){h1{font-size:30px;}h2{font-size:23px;}.cards,.grid2{grid-template-columns:1fr;}}
+  @media print{:root{--paper:#fff;}body{background:#fff;font-size:11pt;}.card,.nugget,.stat,pre{box-shadow:none;}
+    .controls,summary .chev{display:none;}details>.secbody{display:block!important;}
+    details,.card,.nugget{page-break-inside:avoid;}*{-webkit-print-color-adjust:exact;print-color-adjust:exact;}}
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <span class="logo"><span class="flag">GPX</span><span class="word">Stream</span></span>
+    <span class="doc-meta"><span class="tag">Session Recap · Internal</span><br />RootEncoder · 2026-09-02</span>
+  </div>
+  <div class="topdivide"><hr /></div>
+  <div class="wrap">
+    <div class="hero">
+      <p class="eyebrow">Session Recap · 2026-09-02 2044</p>
+      <h1>JitPack :app dexing exhausted disk — not a BouncyCastle bug</h1>
+      <p class="standfirst">The full build log (not just the tail) showed the real D8 failure was
+        <code>No space left on device</code>, not a codec incompatibility. Root cause: JitPack's
+        default build dexes the demo sample app's huge dependency graph even though nothing ever
+        publishes it. Fixed by excluding <code>:app:assemble</code> in <code>jitpack.yml</code>,
+        verified green against the fix commit's real full SHA on JitPack.</p>
+      <div class="stats">
+        <div class="stat"><b>2m 9s</b><span>JitPack build time</span></div>
+        <div class="stat"><b>9 / 9</b><span>modules published</span></div>
+        <div class="stat"><b>0</b><span>:app tasks beyond clean</span></div>
+        <div class="stat"><b>2</b><span>files changed</span></div>
+      </div>
+    </div>
+    <div class="controls">
+      <button type="button" onclick="document.querySelectorAll('details').forEach(d=>d.open=true)">Expand all</button>
+      <button type="button" onclick="document.querySelectorAll('details').forEach(d=>d.open=false)">Collapse all</button>
+    </div>
+
+    <details open>
+      <summary><span class="htext"><span class="sec-eyebrow">Status</span><h2>Fixed &amp; verified</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <div class="cards">
+          <div class="card">
+            <div class="tag"><span class="dot ok"></span>Root cause found</div>
+            <p>Not BouncyCastle/D8, not <code>minSdk</code>. <code>java.io.IOException: No space
+              left on device</code> while dexing the sample <code>:app</code> module's demo
+              dependencies — buried past the summary line, only visible by reading the whole log.</p>
+          </div>
+          <div class="card">
+            <div class="tag"><span class="dot ok"></span>Fix verified on real JitPack</div>
+            <p>Triggered a fresh build against the fix commit's actual full 40-char SHA (not a
+              short hash — the exact mistake being corrected here). <code>BUILD SUCCESSFUL in
+              2m 9s</code>, all 9 modules published, zero <code>:app</code> dexing.</p>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details open>
+      <summary><span class="htext"><span class="sec-eyebrow">The fix</span><h2>jitpack.yml</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <p><code>:app</code> has no <code>maven-publish</code> plugin and is never part of what a
+          consumer resolves — confirmed by the build log's own "Publication:" lines, which name
+          exactly the 9 other modules, never <code>:app</code>. But JitPack's default command runs
+          root-level <code>assemble</code>, which Gradle spreads across every subproject including
+          <code>:app</code>, forcing a full demo-app dex that blows the container's disk quota.</p>
+        <pre><code>install:
+  - ./gradlew clean -Pgroup=$GROUP -Pversion=$VERSION -xtest -xlint assemble publishToMavenLocal -x :app:assemble</code></pre>
+        <p>Added <code>-x :app:assemble</code> to JitPack's own default command. Nothing else
+          changed — no BouncyCastle version bump, no <code>minSdk</code> change, no sample-app
+          dependency removed.</p>
+      </div>
+    </details>
+
+    <details>
+      <summary><span class="htext"><span class="sec-eyebrow">Evidence</span><h2>Verification<span class="count">2 passes</span></h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <div class="grid2">
+          <div class="nugget">
+            <h3>Local (before push)</h3>
+            <p>Isolated worktree, detached at <code>origin/gpx-2.8</code>. Modified install
+              command ran clean: <code>:app:clean UP-TO-DATE</code> only, zero <code>mergeDex</code>
+              anywhere in the log, all 9 <code>publishToMavenLocal</code> tasks succeeded.</p>
+          </div>
+          <div class="nugget">
+            <h3>Real JitPack (after push)</h3>
+            <p>Full SHA <code>2e2ff42eeda43c87d0ee0b229380694091810f64</code>. <code>BUILD
+              SUCCESSFUL in 2m 9s</code>. File listing shows all 9 modules' <code>.aar</code>/
+              <code>.pom</code>/checksums under <code>com/github/andoodle/RootEncoder/&lt;module&gt;/2e2ff42.../</code>.</p>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details>
+      <summary><span class="htext"><span class="sec-eyebrow">Not a problem</span><h2>Noticed, deliberately not touched</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <ul class="clean">
+          <li><strong>Internal groupId is hardcoded.</strong> Every module publishes as
+            <code>com.github.pedroSG94:&lt;module&gt;:2.8.0</code> regardless of the
+            <code>-Pgroup</code>/<code>-Pversion</code> flags — pre-existing, and JitPack's virtual
+            repo remaps it correctly anyway (proven by this session's own successful build). Out of
+            scope, not a bug.</li>
+        </ul>
+      </div>
+    </details>
+
+    <details class="resume">
+      <summary><span class="htext"><span class="sec-eyebrow">Handoff</span><h2>What's next (Andy's call)</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <p>Nothing left to fix on this repo. The only remaining step is in the other repo,
+          <strong>gpxstream-app</strong>: once Andy's satisfied this is genuinely fixed, moving
+          <code>rootEncoderVersion</code> in <code>gradle/libs.versions.toml</code> to
+          <code>2e2ff42eeda43c87d0ee0b229380694091810f64</code> is his decision to make, not
+          this session's.</p>
+        <pre># nothing queued in this repo — informational only
+git -C /Users/andy/Desktop/Development/RootEncoder log --oneline -3</pre>
+      </div>
+    </details>
+
+    <details class="raw">
+      <summary><span class="htext"><span class="sec-eyebrow">For the record</span><h2>Full Record + AI Notes</h2></span><span class="chev">&rsaquo;</span></summary>
+      <div class="secbody">
+        <p class="hint">Complete raw recap + Claude's scratch notes — the same canonical block the AI reads from the top of this file.</p>
+        <pre id="fullmd"></pre>
+      </div>
+    </details>
+  </div>
+  <footer><span>GPX Stream · Session Recap · 2026-09-02 2044</span><span>Internal — RootEncoder</span></footer>
+  <script>document.getElementById('fullmd').textContent=document.getElementById('recap').textContent.trim();</script>
+</body>
+</html>
